@@ -77,6 +77,14 @@ pub fn main() -> Result<()> {
         // vanilla differential corpus: an earlier hit remains applied, but a
         // canceled secondary entity/block impact neither hurts nor sticks.
         for block in [false, true] {
+            let air = assets.registry.default_state("minecraft:air").unwrap();
+            for x in 22..28 {
+                for y in 4..7 {
+                    for z in 23..26 {
+                        scene.set(x, y, z, air)?;
+                    }
+                }
+            }
             scene.set(
                 25,
                 5,
