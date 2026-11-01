@@ -122,15 +122,10 @@ pub fn main() -> Result<()> {
             let a = p.arrow.as_mut().unwrap();
             a.pierce = 1;
             a.fire_ticks = 100;
-            let mut targets = vec![(
-                Who::Mob(2),
-                Aabb::new(Vec3::new(23.7, 4.0, 23.7), Vec3::new(24.3, 5.8, 24.3)),
-            )];
+            let box_at = |min, max| Aabb::new(Vec3::new(min, 4.0, 23.7), Vec3::new(max, 5.8, 24.3));
+            let mut targets = vec![(Who::Mob(2), box_at(23.7, 24.3))];
             if !block {
-                targets.push((
-                    Who::Mob(3),
-                    Aabb::new(Vec3::new(24.5, 4.0, 23.7), Vec3::new(25.1, 5.8, 24.3)),
-                ));
+                targets.push((Who::Mob(3), box_at(24.5, 25.1)));
             }
             assert!(matches!(
                 arrows::tick(&mut p, &view, &targets).1,

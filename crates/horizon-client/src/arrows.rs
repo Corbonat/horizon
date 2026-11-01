@@ -202,6 +202,7 @@ pub struct ArrowState {
 struct Flight {
     end: Vec3,
     targets: Vec<(Who, Vec3)>,
+    block: Option<(Vec3, BlockPos, [i32; 3])>,
 }
 impl fmt::Debug for ArrowState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -655,7 +656,7 @@ fn resume_with(
         // Vanilla repeats the search after the collection has been handled:
         // hit effects may have changed the entities along the original path.
         let from = ticker.p.position;
-        ticker.step_move_and_hit(from, flight.end, targets, impact)
+        ticker.step_with_hit(from, flight.end, targets, impact, flight.block)
     };
     if !matches!(hit, Hit::Entity { .. }) {
         ticker.st.flight = None;
@@ -897,6 +898,18 @@ impl Ticker<'_, '_, '_, '_> {
     ) -> Hit {
         let block = self.scene.clip(from, to);
         let end = block.map_or(to, |b| b.0);
+        self.step_with_hit(from, end, targets, impact, block)
+    }
+    /// `AbstractArrow.stepMoveAndHit` retains its original BlockHitResult
+    /// throughout the entity-hit loop, including an endpoint on a block face.
+    fn step_with_hit(
+        &mut self,
+        from: Vec3,
+        end: Vec3,
+        targets: &[(Who, Aabb)],
+        impact: bool,
+        block: Option<(Vec3, BlockPos, [i32; 3])>,
+    ) -> Hit {
         // findHitEntities: ProjectileUtil.computeMargin and the search box.
         let margin = f64::from(((self.p.age as i32 - 2) as f32 / 20.0).clamp(0.0, 0.3));
         let area = bounds(from)
@@ -935,6 +948,7 @@ impl Ticker<'_, '_, '_, '_> {
                 self.st.flight = Some(Flight {
                     end,
                     targets: hits.into_iter().map(|(who, at, _)| (who, at)).collect(),
+                    block,
                 });
             }
             return self.entity_target(who, at);
