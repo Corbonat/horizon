@@ -207,6 +207,26 @@ def corpus():
                 ops = [op('pickup', pickup), target(25.5, 25.5, takes)] + ticks(6)
                 yield arrow((25.199, 4.5, 25.5), (speed, 0, 0), ops)
     # Despawning 1200 ticks after sticking in the floor.
+    # AbstractArrow.stepMoveAndHit: all targets on one original flight segment,
+    # including coincident boxes; pierce+1 capacity, ignored previous hits,
+    # and a solid block stopping the remaining segment. Expected state and
+    # damage events come from real vanilla Arrow.tick, not the Rust traversal.
+    for pierce in [0, 1, 2]:
+        for spacing in [0, .8]:
+            for wall in [False, True]:
+                positions = [(24, 5, 24), (24 + spacing, 5, 24), (26, 5, 24)]
+                ops = [op('target' if i == 0 else 'target_add', position=vec(at), takes=True)
+                       for i, at in enumerate(positions)]
+                block = [(25, 5, 24), (25, 6, 24)]
+                if wall: ops += place('stone', block)
+                row = arrow((22, 5.5, 24), (5, 0, 0), ops + ticks(3) + (restore(block) if wall else []))
+                row['pierce'] = pierce
+                yield row
+    for spacing in [0, .8]:
+        row = arrow((22, 5.5, 24), (5, 0, 0), [target(24, 24, False),
+                    op('target_add', position=vec((24 + spacing, 4, 24)), takes=True)] + ticks(3))
+        row['pierce'] = 1
+        yield row
     for _ in range(2):
         yield arrow((rng.uniform(18, 30), 6, rng.uniform(4, 30)), (0, -1, 0), ticks(1215))
 

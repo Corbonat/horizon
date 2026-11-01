@@ -55,7 +55,7 @@ AbstractArrow.<init>	port	crates/horizon-client/src/arrows.rs::ArrowState::new	a
 AbstractArrow.defineSynchedData	skip:java		flags, pierce level and in-ground sync fields; Horizon keeps them on ArrowState and Projectile
 AbstractArrow.lerpMotion	skip:other		client interpolation of a server motion packet; Horizon's remote arrows take the server position each update
 AbstractArrow.onSyncedDataUpdated	inline	crates/horizon-client/src/arrows.rs::Ticker::on_hit_block	the 7-tick shake starts when the arrow lands here; vanilla starts it when the client sees it stuck
-AbstractArrow.hitTargetsOrDeflectSelf	port	crates/horizon-client/src/arrows.rs::Ticker::step_move_and_hit	gap: minor: the nearest entity on the way is taken per tick; vanilla goes on through the rest within the same tick
+AbstractArrow.hitTargetsOrDeflectSelf	port	crates/horizon-client/src/arrows.rs::resume_entity_hit	ordered piercing collection resumes within the same tick after synchronous entity hit effects; deflection or removal terminates it
 AbstractArrow.addBubbleParticles	port	crates/horizon-client/src/projectiles.rs::Projectile::arrow_trail	four bubble particles along a submerged arrow
 AbstractArrow.move	inline	crates/horizon-client/src/arrows.rs::Ticker::tick	should_fall then start_falling run from the tick for an arrow in the ground
 AbstractArrow.resetPiercedEntities	inline	crates/horizon-client/src/arrows.rs::Ticker::on_hit_block	the pierced list is cleared when the arrow lands

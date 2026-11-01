@@ -82,9 +82,9 @@ public final class VanillaArrowOracle {
         @Override public BlockState getBlockState(BlockPos p){var c=chunks.get(key(p.getX()>>4,p.getZ()>>4));return c==null?Blocks.AIR.defaultBlockState():c.getBlockState(p);}
         @Override public FluidState getFluidState(BlockPos p){return getBlockState(p).getFluidState();}
         @Override public List<VoxelShape> getEntityCollisions(Entity e,AABB b){return List.of();}
-        Target target;
+        List<Target> targets;
         @Override public List<Entity> getEntities(Entity e,AABB b,java.util.function.Predicate<? super Entity> p){
-            return target!=null&&target.getBoundingBox().intersects(b)&&p.test(target)?List.of(target):List.of();
+            return targets.stream().filter(t->t.getBoundingBox().intersects(b)&&p.test(t)).map(t->(Entity)t).toList();
         }
         @Override public WorldBorder getWorldBorder(){return border;}
         @Override public net.minecraft.util.RandomSource getRandom(){return rng;}
@@ -165,6 +165,7 @@ public final class VanillaArrowOracle {
         var random=field(Entity.class,"random");var inGroundTime=field(AbstractArrow.class,"inGroundTime");var life=field(AbstractArrow.class,"life");var lastState=field(AbstractArrow.class,"lastState");
         var touching=field(Entity.class,"wasTouchingWater");var eyes=field(Entity.class,"wasEyeInWater");var first=field(Entity.class,"firstTick");
         var inGround=AbstractArrow.class.getDeclaredMethod("isInGround");inGround.setAccessible(true);
+        var setPierce=AbstractArrow.class.getDeclaredMethod("setPierceLevel",byte.class);setPierce.setAccessible(true);
         try(var out=new PrintWriter(Files.newBufferedWriter(dir.resolve(args[0]+".txt")));var lines=Files.lines(dir.resolve("inputs.txt"))){
             for(var line:(Iterable<String>)lines::iterator){
                 var row=JsonParser.parseString(line).getAsJsonObject();
@@ -177,7 +178,8 @@ public final class VanillaArrowOracle {
                 // The client's recreateFromPacket snaps a spawned arrow, old position included.
                 a.setOldPosAndRot();
                 a.setCritArrow(row.get("crit").getAsBoolean());a.setNoPhysics(row.get("no_physics").getAsBoolean());
-                String touched="-";level.target=null;
+                if(row.has("pierce"))setPierce.invoke(a,row.get("pierce").getAsByte());
+                String touched="-";level.targets=new ArrayList<>();
                 for(var value:row.getAsJsonArray("ops")){
                     var op=value.getAsJsonObject();
                     switch(op.get("mode").getAsString()){
@@ -202,12 +204,13 @@ public final class VanillaArrowOracle {
                             a.setOwner(owner);a.setOwner((Entity)null);
                         }
                         // A player-sized box standing at the position.
-                        case "target"->{
+                        case "target","target_add"->{
+                            if(op.get("mode").getAsString().equals("target"))level.targets.clear();
                             var t=(Target)allocate.invoke(unsafe,Target.class);t.takes=op.get("takes").getAsBoolean();t.events=level.events;
                             var at=VanillaSceneCollisionOracle.vector(op.get("position"));
                             field(Entity.class,"level").set(t,level);field(Entity.class,"position").set(t,at);
                             field(Entity.class,"bb").set(t,EntityDimensions.scalable(0.6F,1.8F).makeBoundingBox(at));
-                            level.target=t;
+                            t.setId(level.targets.size()+2);level.targets.add(t);
                         }
                         // ArrowItem.asProjectile (dispensers) sets pickup directly.
                         case "pickup"->a.pickup=AbstractArrow.Pickup.byOrdinal(op.get("value").getAsInt());

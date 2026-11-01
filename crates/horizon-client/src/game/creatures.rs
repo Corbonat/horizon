@@ -3407,10 +3407,22 @@ impl Game<'_> {
 
     fn tick_projectiles(&mut self) -> Result<()> {
         let mut projectiles = std::mem::take(&mut self.creatures.projectiles);
+        // Collision target ids use this tick's original projectile indices.
+        // Keep their entity identities while hit handling removes/re-adds arrows.
+        let wind_ids: Vec<_> = projectiles
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                super::deflect::redirectable(p)
+                    && !matches!(p.kind, ProjectileKind::LargeFireball { .. })
+            })
+            .map(|(i, p)| (WIND_CHARGE_IDS + i as u32, p.id))
+            .collect();
         let mut hits = Vec::new();
         let mut deflections: Vec<[f64; 3]> = Vec::new();
         let mut arrow_events = Vec::new();
         let mut trails = Vec::new();
+        let jitter;
         {
             let mut targets: Vec<(Who, Aabb)> = self
                 .mobs
@@ -3437,7 +3449,7 @@ impl Game<'_> {
                 .collect();
             // Drawn only when a breeze could deflect a projectile: an empty
             // level must not move the level random every tick.
-            let jitter = if breezes.is_empty() || projectiles.is_empty() {
+            jitter = if breezes.is_empty() || projectiles.is_empty() {
                 0.0
             } else {
                 self.world.random.next_float()
@@ -3625,28 +3637,135 @@ impl Game<'_> {
             self.arrow_event(at, event);
         }
         self.creatures.projectiles.append(&mut projectiles);
-        for (p, hit) in hits {
+        let mut hits = std::collections::VecDeque::from(hits);
+        while let Some((mut p, hit)) = hits.pop_front() {
+            let arrow_hit = p.arrow.is_some() && matches!(hit, Hit::Entity { .. });
+            if arrow_hit
+                && let Hit::Entity {
+                    who: Who::Mob(id),
+                    at,
+                } = hit
+            {
+                if self
+                    .mobs
+                    .iter()
+                    .any(|m| m.id == id && m.alive() && m.species() == Species::Breeze)
+                {
+                    // A later target in the same piercing collection can deflect too.
+                    super::wind::reverse(&mut p, jitter);
+                    self.finish_arrow_hit(p, EntityHit::Deflected);
+                    self.audio.play(
+                        "minecraft:entity.breeze.deflect",
+                        Some([at.x, at.y, at.z]),
+                        1.0,
+                        1.0,
+                    );
+                    continue;
+                }
+                if let Some((_, entity)) = wind_ids.iter().find(|(target, _)| *target == id) {
+                    let look = self.owner_look(p.owner, p.guest);
+                    if let Some(wind) = self
+                        .creatures
+                        .projectiles
+                        .iter_mut()
+                        .find(|q| q.id == *entity)
+                    {
+                        super::deflect::aim_deflect(wind, look, p.owner, p.owner_uuid, p.guest);
+                    }
+                }
+            }
+            if arrow_hit {
+                // The entity remains in the level during onHitEntity. In
+                // particular, an exploding TNT cart pushes this arrow too.
+                self.creatures.projectiles.push(p.clone());
+            }
             // A player's arrow on another player lands as the victim's hurt.
             if let Some(victim) = self.projectile_pvp_victim(&p, hit) {
                 self.projectile_hits_player(&p, hit, victim)?;
-                continue;
-            }
-            // A guest's projectile lands as theirs: a pearl takes them, what
-            // it hurts answers to them. One hitting the host (`Who::Player`
-            // here) stays the host's hit.
-            match p.guest {
-                Some(conn)
-                    if !matches!(
-                        hit,
-                        Hit::Entity {
-                            who: Who::Player,
-                            ..
-                        }
-                    ) =>
-                {
-                    self.guest_projectile_hit(conn, &p, hit)?;
+            } else {
+                // A guest's projectile lands as theirs: a pearl takes them, what
+                // it hurts answers to them. One hitting the host (`Who::Player`
+                // here) stays the host's hit.
+                match p.guest {
+                    Some(conn)
+                        if !matches!(
+                            hit,
+                            Hit::Entity {
+                                who: Who::Player,
+                                ..
+                            }
+                        ) =>
+                    {
+                        self.guest_projectile_hit(conn, &p, hit)?;
+                    }
+                    _ => self.projectile_hit(&p, hit)?,
                 }
-                _ => self.projectile_hit(&p, hit)?,
+            }
+            if arrow_hit
+                && let Some(i) = self.creatures.projectiles.iter().position(|a| a.id == p.id)
+            {
+                let mut arrow = self.creatures.projectiles.remove(i);
+                let mut targets: Vec<_> = self
+                    .mobs
+                    .iter()
+                    .filter(|m| m.alive())
+                    .map(|m| (Who::Mob(m.id), m.bounds()))
+                    .collect();
+                if let Some(player) = self.player_view().filter(|p| p.alive) {
+                    targets.push((Who::Player, player.bounds));
+                }
+                targets.extend(
+                    self.special_targets()
+                        .into_iter()
+                        .map(|(id, b)| (Who::Mob(id), b)),
+                );
+                targets.extend(self.carts.iter().map(|c| (Who::Mob(c.id), c.bounds())));
+                targets.extend(self.lan_projectile_targets());
+                targets.extend(wind_ids.iter().filter_map(|(target, entity)| {
+                    self.creatures
+                        .projectiles
+                        .iter()
+                        .find(|q| q.id == *entity && !q.stuck)
+                        .map(|q| (Who::Mob(*target), q.aabb()))
+                }));
+                let shooter = arrow
+                    .guest
+                    .and_then(|conn| {
+                        self.lan_guest_entities()
+                            .into_iter()
+                            .find(|(c, _)| *c == conn)
+                    })
+                    .map(|(_, id)| Who::Mob(id));
+                if let Some(shooter) = shooter {
+                    arrow.owner = Some(shooter);
+                }
+                let resumed = {
+                    let rain = self.arrow_rain();
+                    horizon_client::arrows::resume_entity_hit(
+                        &mut arrow,
+                        &self.arrow_scene(&rain),
+                        &targets,
+                    )
+                };
+                if shooter.is_some() {
+                    arrow.owner = Some(Who::Player);
+                }
+                if let Some(a) = arrow.arrow.as_mut() {
+                    for event in std::mem::take(&mut a.events) {
+                        self.arrow_event(arrow.position, event);
+                    }
+                }
+                match resumed {
+                    Some((keep, next)) => {
+                        if keep {
+                            self.creatures.projectiles.push(arrow.clone());
+                        }
+                        if next != Hit::None {
+                            hits.push_front((arrow, next));
+                        }
+                    }
+                    None => self.creatures.projectiles.push(arrow),
+                }
             }
         }
         self.flush_lan_explosions();
@@ -3908,6 +4027,16 @@ impl Game<'_> {
     /// (`arrows::finish_entity_hit`): its sounds and drop, and back among the
     /// projectiles if it flies on.
     fn finish_arrow_hit(&mut self, mut arrow: Projectile, outcome: EntityHit) {
+        if let Some(i) = self
+            .creatures
+            .projectiles
+            .iter()
+            .position(|p| p.id == arrow.id)
+        {
+            let active = self.creatures.projectiles.remove(i);
+            arrow.velocity = active.velocity;
+            arrow.needs_sync |= active.needs_sync;
+        }
         let keep = {
             let rain = self.arrow_rain();
             horizon_client::arrows::finish_entity_hit(&mut arrow, &self.arrow_scene(&rain), outcome)

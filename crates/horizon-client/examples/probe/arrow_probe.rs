@@ -86,13 +86,14 @@ pub fn main() -> Result<()> {
             .with_arrow_random(LegacyRandom::new(seed(&f["seed"])));
         arrow.velocity = vector(&f["velocity"]);
         arrow.arrow.as_mut().unwrap().no_physics = f["no_physics"].as_bool().unwrap();
+        arrow.arrow.as_mut().unwrap().pierce = f["pierce"].as_u64().unwrap_or(0) as u8;
         // ProjectileWeaponItem.useAmmo's stack, intangible when no ammo was used.
         arrow.arrow.as_mut().unwrap().set_item(&arrows::drawn_ammo(
             &ItemStack::new("minecraft:arrow", 1),
             f["intangible"].as_bool().unwrap(),
         ));
         // The entity in the way: its box and whether it takes the damage.
-        let mut target: Option<(Aabb, bool)> = None;
+        let mut target: Vec<(Aabb, bool)> = Vec::new();
         for op in f["ops"].as_array().unwrap() {
             let mut events = Vec::new();
             let mut touched = "-".to_string();
@@ -100,7 +101,7 @@ pub fn main() -> Result<()> {
                 "tick" => {
                     // The game's part of an entity hit: the damage it deals
                     // (recorded after the tick's own events).
-                    let mut hurt = None;
+                    let mut hurt = Vec::new();
                     if !arrow.arrow.as_ref().unwrap().removed {
                         let no_rain = |_| false;
                         let view = ArrowScene {
@@ -113,12 +114,20 @@ pub fn main() -> Result<()> {
                             mob_griefing: true,
                             tnt_explodes: true,
                         };
-                        let targets: Vec<_> = target.iter().map(|t| (Who::Mob(2), t.0)).collect();
-                        let (_, hit) = arrows::tick(&mut arrow, &view, &targets);
-                        if let (Hit::Entity { .. }, Some((_, takes))) = (hit, target) {
+                        let targets: Vec<_> = target
+                            .iter()
+                            .enumerate()
+                            .map(|(i, t)| (Who::Mob(i as u32 + 2), t.0))
+                            .collect();
+                        let (_, mut hit) = arrows::tick(&mut arrow, &view, &targets);
+                        while let Hit::Entity {
+                            who: Who::Mob(id), ..
+                        } = hit
+                        {
+                            let takes = target[id as usize - 2].1;
                             let mut st = arrow.arrow.take().unwrap();
                             let damage = arrow.arrow_damage(&mut st.random);
-                            hurt = Some((st.events.len(), damage));
+                            hurt.push((st.events.len(), damage));
                             arrow.arrow = Some(st);
                             let outcome = if takes {
                                 EntityHit::Hurt
@@ -126,6 +135,8 @@ pub fn main() -> Result<()> {
                                 EntityHit::Refused
                             };
                             arrows::finish_entity_hit(&mut arrow, &view, outcome);
+                            hit = arrows::resume_entity_hit(&mut arrow, &view, &targets)
+                                .map_or(Hit::None, |(_, hit)| hit);
                         }
                     }
                     let a = arrow.arrow.as_mut().unwrap();
@@ -133,9 +144,7 @@ pub fn main() -> Result<()> {
                     let raised = std::mem::take(&mut a.events);
                     let count = raised.len();
                     for (i, event) in raised.into_iter().map(Some).chain([None]).enumerate() {
-                        if let Some((at, damage)) = hurt
-                            && at == i
-                        {
+                        for &(_, damage) in hurt.iter().filter(|(at, _)| *at == i) {
                             events.push(format!("hurt {:08x}", damage.to_bits()));
                         }
                         let Some(event) = event else {
@@ -241,7 +250,10 @@ pub fn main() -> Result<()> {
                         }
                     }
                 }
-                "target" => {
+                "target" | "target_add" => {
+                    if op["mode"] == "target" {
+                        target.clear();
+                    }
                     // EntityDimensions.scalable(0.6, 1.8).makeBoundingBox.
                     let at = vector(&op["position"]);
                     let w = f64::from(0.6f32) / 2.0;
@@ -250,7 +262,7 @@ pub fn main() -> Result<()> {
                         Vec3::new(at.x - w, at.y, at.z - w),
                         Vec3::new(at.x + w, at.y + h, at.z + w),
                     );
-                    target = Some((b, op["takes"].as_bool().unwrap()));
+                    target.push((b, op["takes"].as_bool().unwrap()));
                 }
                 "block" => {
                     let p = &op["position"];
