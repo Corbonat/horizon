@@ -72,6 +72,100 @@ pub fn main() -> Result<()> {
     let binding = collisions::load(&root, assets.registry)?;
     let motion = MotionResources::load(&root, &assets)?;
     let facts = BlockFacts::load(&root, assets.registry)?;
+    if args[2] == "--resume-cancel" {
+        // Horizon's native impact-cancellation contract, separate from the
+        // vanilla differential corpus: an earlier hit remains applied, but a
+        // canceled secondary entity/block impact neither hurts nor sticks.
+        for block in [false, true] {
+            scene.set(
+                25,
+                5,
+                24,
+                assets
+                    .registry
+                    .default_state(if block {
+                        "minecraft:stone"
+                    } else {
+                        "minecraft:air"
+                    })
+                    .unwrap(),
+            )?;
+            let no_rain = |_| false;
+            let view = ArrowScene {
+                world: &scene,
+                registry: assets.registry,
+                facts: &facts,
+                collision: &binding,
+                fluids: &motion.fluids,
+                raining: &no_rain,
+                mob_griefing: true,
+                tnt_explodes: true,
+            };
+            let mut p = Projectile::new(
+                ProjectileKind::Arrow {
+                    base_damage: 2.0,
+                    critical: false,
+                    effect: None,
+                },
+                Vec3::new(22.0, 5.5, 24.0),
+                None,
+            );
+            p.velocity = Vec3::new(5.0, 0.0, 0.0);
+            let a = p.arrow.as_mut().unwrap();
+            a.pierce = 1;
+            a.fire_ticks = 100;
+            let mut targets = vec![(
+                Who::Mob(2),
+                Aabb::new(Vec3::new(23.7, 4.0, 23.7), Vec3::new(24.3, 5.8, 24.3)),
+            )];
+            if !block {
+                targets.push((
+                    Who::Mob(3),
+                    Aabb::new(Vec3::new(24.5, 4.0, 23.7), Vec3::new(25.1, 5.8, 24.3)),
+                ));
+            }
+            assert!(matches!(
+                arrows::tick(&mut p, &view, &targets).1,
+                Hit::Entity {
+                    who: Who::Mob(2),
+                    ..
+                }
+            ));
+            assert!(arrows::finish_entity_hit(&mut p, &view, EntityHit::Hurt));
+            let mut canceled = p.clone();
+            let proposed = arrows::resume_entity_hit(&mut p, &view, &targets)
+                .unwrap()
+                .1;
+            assert!(if block {
+                matches!(proposed, Hit::Block { .. })
+            } else {
+                matches!(
+                    proposed,
+                    Hit::Entity {
+                        who: Who::Mob(3),
+                        ..
+                    }
+                )
+            });
+            assert_eq!(
+                arrows::resume_entity_hit_through(&mut canceled, &view, &targets),
+                Some((true, Hit::None))
+            );
+            let a = canceled.arrow.as_ref().unwrap();
+            assert_eq!(a.pierced, vec![Who::Mob(2)]);
+            assert!(!a.in_ground && !a.removed && !canceled.stuck);
+            assert_eq!(a.fire_ticks, 99);
+            assert_eq!(canceled.age, 1);
+            assert_eq!(canceled.position.x, if block { 25.0 } else { 24.5 });
+            assert_eq!(
+                canceled.velocity,
+                Vec3::new(5.0 * f64::from(0.99f32), -0.05, 0.0)
+            );
+            assert!(arrows::resume_entity_hit(&mut canceled, &view, &targets).is_none());
+        }
+        println!("secondary entity/block cancellation preserves prior hits and finishes once");
+        return Ok(());
+    }
     let side = &args[2];
     let mut out = std::io::BufWriter::new(fs::File::create(dir.join(format!("rust-{side}.txt")))?);
     let mut level_random = LegacyRandom::new(0);

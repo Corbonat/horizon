@@ -513,6 +513,24 @@ fn signum(v: f64) -> f64 {
 /// entity stops there and is not kept: the game hands it to
 /// `finish_entity_hit` once it has hurt the entity.
 pub fn tick(p: &mut Projectile, scene: &ArrowScene, targets: &[(Who, Aabb)]) -> (bool, Hit) {
+    tick_with(p, scene, targets, true)
+}
+/// One arrow tick whose hit is canceled (`ProjectileImpactEvent`): the arrow
+/// moves on to where it would have hit, as `AbstractArrow.stepMoveAndHit` leaves
+/// it when the event is canceled, and flies on: not stuck, nothing hurt, no hit.
+pub fn tick_through(
+    p: &mut Projectile,
+    scene: &ArrowScene,
+    targets: &[(Who, Aabb)],
+) -> (bool, Hit) {
+    tick_with(p, scene, targets, false)
+}
+fn tick_with(
+    p: &mut Projectile,
+    scene: &ArrowScene,
+    targets: &[(Who, Aabb)],
+    impact: bool,
+) -> (bool, Hit) {
     let Some(mut st) = p.arrow.take() else {
         return (false, Hit::None);
     };
@@ -525,7 +543,7 @@ pub fn tick(p: &mut Projectile, scene: &ArrowScene, targets: &[(Who, Aabb)]) -> 
         st: &mut st,
         scene,
     }
-    .tick(targets);
+    .tick(targets, impact);
     p.stuck = st.in_ground;
     let keep = !st.removed && !matches!(hit, Hit::Entity { .. });
     p.arrow = Some(st);
@@ -595,6 +613,23 @@ pub fn resume_entity_hit(
     scene: &ArrowScene,
     targets: &[(Who, Aabb)],
 ) -> Option<(bool, Hit)> {
+    resume_with(p, scene, targets, true)
+}
+/// A resumed impact canceled by `ProjectileImpactEvent`: preserve the earlier
+/// hits, move to this impact, and finish the tick without hurting or sticking.
+pub fn resume_entity_hit_through(
+    p: &mut Projectile,
+    scene: &ArrowScene,
+    targets: &[(Who, Aabb)],
+) -> Option<(bool, Hit)> {
+    resume_with(p, scene, targets, false)
+}
+fn resume_with(
+    p: &mut Projectile,
+    scene: &ArrowScene,
+    targets: &[(Who, Aabb)],
+    impact: bool,
+) -> Option<(bool, Hit)> {
     let mut st = p.arrow.take()?;
     let Some(mut flight) = st.flight.take() else {
         p.arrow = Some(st);
@@ -607,13 +642,20 @@ pub fn resume_entity_hit(
     };
     let hit = if !flight.targets.is_empty() {
         let (who, at) = flight.targets.remove(0);
-        ticker.st.flight = Some(flight);
-        ticker.entity_target(who, at)
+        if impact {
+            ticker.st.flight = Some(flight);
+            ticker.entity_target(who, at)
+        } else {
+            let from = ticker.p.position;
+            ticker.p.position = at;
+            ticker.apply_effects_from_blocks(from, at);
+            Hit::None
+        }
     } else {
         // Vanilla repeats the search after the collection has been handled:
         // hit effects may have changed the entities along the original path.
         let from = ticker.p.position;
-        ticker.step_move_and_hit(from, flight.end, targets)
+        ticker.step_move_and_hit(from, flight.end, targets, impact)
     };
     if !matches!(hit, Hit::Entity { .. }) {
         ticker.st.flight = None;
@@ -652,7 +694,7 @@ impl Ticker<'_, '_, '_, '_> {
     fn trident(&self) -> bool {
         matches!(self.p.kind, ProjectileKind::Trident)
     }
-    fn tick(&mut self, targets: &[(Who, Aabb)]) -> Hit {
+    fn tick(&mut self, targets: &[(Who, Aabb)], impact: bool) -> Hit {
         // ThrownTrident.tick.
         if self.trident() && self.st.in_ground_time > 4 {
             self.st.dealt_damage = true;
@@ -763,7 +805,7 @@ impl Ticker<'_, '_, '_, '_> {
             original.z + movement.z,
         );
         if physics {
-            hit = self.step_move_and_hit(original, end, targets);
+            hit = self.step_move_and_hit(original, end, targets, impact);
             if matches!(hit, Hit::Entity { .. }) {
                 return hit;
             }
@@ -846,7 +888,13 @@ impl Ticker<'_, '_, '_, '_> {
     }
     /// `AbstractArrow.stepMoveAndHit`: collect the segment's hits in vanilla's
     /// stable order, suspending only to let the game apply each entity hit.
-    fn step_move_and_hit(&mut self, from: Vec3, to: Vec3, targets: &[(Who, Aabb)]) -> Hit {
+    fn step_move_and_hit(
+        &mut self,
+        from: Vec3,
+        to: Vec3,
+        targets: &[(Who, Aabb)],
+        impact: bool,
+    ) -> Hit {
         let block = self.scene.clip(from, to);
         let end = block.map_or(to, |b| b.0);
         // findHitEntities: ProjectileUtil.computeMargin and the search box.
@@ -879,6 +927,10 @@ impl Ticker<'_, '_, '_, '_> {
         self.apply_effects_from_blocks(from, next);
         if !hits.is_empty() {
             let (who, at, _) = hits.remove(0);
+            // A canceled impact ends the search, the arrow where it would have hit.
+            if !impact {
+                return Hit::None;
+            }
             if self.st.pierce > 0 {
                 self.st.flight = Some(Flight {
                     end,
@@ -895,6 +947,9 @@ impl Ticker<'_, '_, '_, '_> {
         }
         let state = self.scene.block(pos);
         if self.scene.is_air(state) {
+            return Hit::None;
+        }
+        if !impact {
             return Hit::None;
         }
         self.on_hit_block(pos, state);
