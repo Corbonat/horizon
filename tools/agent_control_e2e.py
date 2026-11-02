@@ -31,6 +31,7 @@ started here have no audio (HORIZON_NO_AUDIO=1).
 import argparse
 import base64
 import json
+import math
 import os
 import re
 import shutil
@@ -906,10 +907,126 @@ def pause_save_scenario(d, out):
     return {'saved_on_pause': saved}
 
 
+def arrow_wind_order_scenario(d, out):
+    """Projectile.onHit/onRedirectProjectile and AbstractHurtingProjectile.tick, real 26.3 values."""
+    d('options_set', key='maxFps', value='60')
+    options = d('options_get', keys='maxFps renderDistance simulationDistance')['options']
+    assert options['maxFps']['value'] == 60, options
+    d('open', world='ArrowWindOrder', seed=6134, mode='creative')
+    d('wait_for', condition='loaded', timeout=400)
+    d('wait_ready', seconds=400)
+    results = {'options': options, 'cases': {}, 'mismatches': []}
+
+    def command(value):
+        reply = d('command', command=value)
+        with (out / 'arrow-wind-commands.jsonl').open('a', encoding='utf8') as f:
+            f.write(json.dumps({'command': value, 'reply': reply}) + '\n')
+        return '\n'.join(reply['chat'])
+
+    def vector(nbt, key):
+        match = re.search(r'\b' + key + r': \[([^]]+)\]', nbt)
+        assert match, (key, nbt)
+        value = [float(x.strip().removesuffix('d')) for x in match[1].split(',')]
+        assert len(value) == 3 and all(math.isfinite(x) for x in value), (key, nbt)
+        return value
+
+    def owner(nbt):
+        match = re.search(r'\bOwner: \[I;([^]]+)\]', nbt)
+        assert match, nbt
+        value = [int(x.strip()) for x in match[1].split(',')]
+        assert len(value) == 4, nbt
+        return value
+
+    def time_now():
+        reply = command('time query gametime')
+        match = re.search(r'game time is (\d+)', reply, re.I)
+        assert match, reply
+        return int(match[1])
+
+    def step():
+        before, deadline = time_now(), time.monotonic() + 15
+        command('tick step 1')
+        while (now := time_now()) != before + 1:
+            assert now == before and time.monotonic() < deadline, (before, now)
+            d('wait', ticks=2)
+
+    def snapshot(cart):
+        observed = {'time': time_now()}
+        for kind, count in [('arrow', 1), ('wind_charge', 1), ('minecart', int(cart))]:
+            selector = '@e[type=minecraft:' + kind + ']'
+            reply = command('execute ' + ('if' if count else 'unless') + ' entity ' + selector)
+            if count:
+                match = re.search(r'Count: (\d+)', reply)
+                assert match and int(match[1]) == 1, (kind, reply)
+                observed[kind] = command('data get entity ' + selector[:-1] + ',limit=1]')
+            else:
+                assert 'Test passed' in reply, (kind, reply)
+        return observed
+
+    command('gamemode creative @a')
+    command('fill -35 119 -5 20 119 15 minecraft:obsidian')
+    command('fill -35 120 -5 20 126 15 minecraft:air')
+    command('tp @a 0.5 120 10.5 -90 0')
+    d('wait', ticks=8)
+    uid = re.search(r'\[I;[^]]+\]', command('data get entity @a[limit=1] UUID'))
+    assert uid
+    shooter = [int(x.strip()) for x in uid[0][3:-1].split(',')]
+    assert len(shooter) == 4, uid[0]
+    command('tick freeze')
+    for resumed in (False, True):
+        for wind_first in (False, True):
+            name = ('resumed' if resumed else 'first') + ('_wind_before' if wind_first else '_wind_after')
+            case = results['cases'][name] = {}
+            for kind in ('arrow', 'wind_charge', 'minecart'):
+                command('kill @e[type=minecraft:' + kind + ']')
+            if resumed:
+                command('summon minecraft:minecart 3.6 121 0.5 {NoGravity:1b}')
+            wind = 'summon minecraft:wind_charge 4.9 121.4 0.5 {Motion:[0d,0d,0d],acceleration_power:0d,NoGravity:1b}'
+            arrow = ('summon minecraft:arrow -26.5 121.52 0.5 {Motion:[5d,0d,0d],NoGravity:1b,Owner:'
+                     + uid[0] + ',PierceLevel:' + str(int(resumed)) + 'b,damage:2d}')
+            for summon in ([wind, arrow] if wind_first else [arrow, wind]):
+                command(summon)
+            case['spawn'] = snapshot(resumed)
+            assert vector(case['spawn']['arrow'], 'Motion') == [5., 0., 0.], case
+            assert f'PierceLevel: {int(resumed)}b' in case['spawn']['arrow'], case
+            assert all('NoGravity: 1b' in case['spawn'][kind] for kind in ('arrow', 'wind_charge')), case
+            for _ in range(6):
+                step()
+            case['before'] = snapshot(resumed)
+            assert owner(case['before']['arrow']) == shooter, case
+            assert vector(case['before']['wind_charge'], 'Motion') == [0., 0., 0.], case
+            assert vector(case['before']['wind_charge'], 'Pos') == [4.9, 121.4, .5], case
+            for key, expected in [('Pos', [2.7599259958956948, 121.52, .5]),
+                                  ('Motion', [4.7074010190854425, 0., 0.])]:
+                assert all(math.isclose(a, b, rel_tol=0, abs_tol=1e-9)
+                           for a, b in zip(vector(case['before']['arrow'], key), expected)), case
+            if resumed:
+                assert vector(case['before']['minecart'], 'Pos') == [3.6, 121., .5], case
+            for phase in ('impact', 'next'):
+                step()
+                case[phase] = snapshot(False)
+                charge = case[phase]['wind_charge']
+                assert owner(charge) == owner(case['before']['arrow']), case
+                assert 'acceleration_power: 0.1d' in charge, case
+                assert vector(case[phase]['arrow'], 'Motion')[0] < 0, case
+                # Redirect happens before/after the charge's own tick according to entity order.
+                ahead = int(not wind_first) + int(phase == 'next')
+                expected = {'Motion': [(1., 1.1, 1.2)[ahead], 0., 0.],
+                            'Pos': [(4.9, 6., 7.2)[ahead], 121.4, .5]}
+                for key, value in expected.items():
+                    actual = vector(charge, key)
+                    if not all(math.isclose(a, b, rel_tol=0, abs_tol=1e-9) for a, b in zip(actual, value)):
+                        results['mismatches'].append({'case': name, 'phase': phase, 'field': key,
+                                                      'expected': value, 'actual': actual})
+                (out / 'arrow-wind-order.json').write_text(json.dumps(results, indent=2) + '\n', encoding='utf8')
+    assert not results['mismatches'], results['mismatches']
+    return results
+
+
 SCENARIOS = {'survival': scenario, 'ui': ui_scenario, 'options': options_scenario, 'events': events_scenario,
              'consume': consume_scenario, 'use-screen': use_screen_scenario, 'pick': pick_scenario,
              'suggestions': suggestions_scenario, 'manage': manage_scenario, 'pause-save': pause_save_scenario,
-             'repro': repro_scenario}
+             'repro': repro_scenario, 'arrow-wind-order': arrow_wind_order_scenario}
 
 
 REFUSAL = "AI features are off: turn off No AI in the launcher's settings"
