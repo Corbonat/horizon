@@ -1273,10 +1273,10 @@ impl Game<'_> {
             horizon_client::items::bucket_contents(&item).expect("filled bucket dispatcher");
         let target_pos = Self::pos_of(target);
         let emptied = self.with_level(|b, level, ticks| {
-            b.bucket_empty(level, ticks, target_pos, content, sound, false, false)
+            b.bucket_empty(level, ticks, target_pos, None, content, sound, false, false)
         });
         self.process_level_events()?;
-        if !emptied {
+        if emptied.is_none() {
             return Ok((self.dispense_default(pos, facing, stack), CLICK));
         }
         if self.dim == super::Dim::Nether
@@ -1779,10 +1779,7 @@ impl Game<'_> {
                 let random = self.rand_sequences.get(&sequence, self.level.seed);
                 world_items!(self).loot_table_from(table, false, held, random)
             }
-            None => self
-                .res
-                .items()
-                .loot_table(table, false, held, &mut self.world.random),
+            None => world_items!(self).loot_table(table, false, held, &mut self.world.random),
         }
     }
     /// `Entity.spawnAtLocation(level, stack, offset)`: an item at the entity's
@@ -1954,6 +1951,7 @@ impl Game<'_> {
                         .play("minecraft:entity.mooshroom.shear", sound_at, 1.0, 1.0);
                     // convertTo(COW): the cow takes its place, then the mushrooms drop.
                     self.convert_mob(i, "minecraft:cow");
+                    self.mooshroom_shear_puff([at.x, at.y, at.z], height);
                     let drops = self.sequence_loot(
                         "minecraft:shearing/mooshroom",
                         &format!("minecraft:shearing/mooshroom/{variant}"),

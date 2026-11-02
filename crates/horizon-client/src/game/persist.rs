@@ -495,16 +495,15 @@ impl Game<'_> {
                     "minecraft:trident" => {
                         if let Some(n) = entity_nbt::trident_from_nbt(&tag) {
                             let mut t = super::trident::ThrownTrident::from_nbt(n);
+                            t.id = self.take_entity_id();
                             // One that came through a portal keeps its cooldown.
-                            super::lan_entities::assign_entity_id(&mut self.next_entity, &mut t.id);
                             self.restore_portal_cooldown(t.id, &tag);
                             self.tridents.push(t);
                         }
                     }
                     "minecraft:firework_rocket" => {
                         if let Some(r) = entity_nbt::firework_rocket_from_nbt(&tag, player_uuid) {
-                            self.next_entity += 1;
-                            let id = self.next_entity;
+                            let id = self.take_entity_id();
                             let mut rocket = super::fireworks::Rocket::from_nbt(r);
                             rocket.id = id;
                             // One that came through a portal keeps its cooldown.
@@ -535,6 +534,9 @@ impl Game<'_> {
                                 on_ground: matches!(tag.get("OnGround"), Some(Tag::Byte(1))),
                                 owner: None,
                                 guest: None,
+                                // PrimedTnt.readAdditionalSaveData: 4 by default,
+                                // kept to 0..128.
+                                power: entity_nbt::tnt_power(&tag),
                             });
                             // `Entity.load`: the `PortalCooldown` of one that just came through.
                             self.remember(id, uuid, tag);
@@ -1269,6 +1271,7 @@ impl Game<'_> {
                     t.velocity,
                     t.on_ground,
                     t.fuse,
+                    t.power,
                     uuid,
                     self.persist.raw.get(&id),
                 );
@@ -1504,6 +1507,7 @@ impl Game<'_> {
                 })
                 .map(|i| self.mobs[i].id)
                 .collect();
+            let mobs_before = self.mob_ids();
             self.mobs.retain(|m| {
                 let keep = !leaving.contains(&m.id);
                 if !keep {
@@ -1521,6 +1525,7 @@ impl Game<'_> {
             });
             self.orbs.retain(|o| !gone(o.position));
             // Unloaded with their chunk: PersistentEntitySectionManager.stopTracking.
+            self.native_mobs_left_since(&mobs_before);
             self.native_items_left_since(&items_before);
             self.native_orbs_left_since(&orbs_before);
             // the ones saved with the chunk go with it (a trident too, unsaved).

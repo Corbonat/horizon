@@ -637,6 +637,8 @@ struct ServerState {
     max_players: usize,
     /// The mutable `gamemode` server property (`DedicatedServer.gameMode`).
     game_mode: i32,
+    /// The mutable `force-gamemode` server property (`DedicatedServer.forceGameMode`).
+    force_game_mode: bool,
 }
 
 /// The dedicated-only commands' replies vanilla sends with `broadcast`
@@ -1005,6 +1007,7 @@ impl Game<'_> {
             broadcast_rcon: props.broadcast_rcon_to_ops,
             op_level: props.op_permission_level,
             game_mode: props.game_mode,
+            force_game_mode: props.force_game_mode,
             report: None,
             view: (
                 props.view_distance.clamp(2, 32) as u32,
@@ -1457,13 +1460,17 @@ impl Game<'_> {
             }
             "whitelist" => self.console_whitelist(state, &rest),
             // The chat filter's (game/chat_filter.rs), on servers that filter.
-            "unmute"
-                if rest.len() == 1 && self.lan.as_ref().is_some_and(|h| h.hub.chat_filter_on()) =>
+            command
+                if super::chat_filter::MUTE_COMMANDS.contains(&command)
+                    && self.lan.as_ref().is_some_and(|h| h.hub.chat_filter_on()) =>
             {
                 if let Some(mut host) = self.lan.take() {
-                    let reply = self.unmute(&mut host, rest[0], "Server");
+                    let words: Vec<&str> = [command].into_iter().chain(rest).collect();
+                    let replies = self.mute_command(&mut host, &words, "Server");
                     self.lan = Some(host);
-                    self.console_reply(lit(&reply));
+                    for reply in replies {
+                        self.console_reply(lit(&reply));
+                    }
                 }
             }
             "ban" if !rest.is_empty() => {

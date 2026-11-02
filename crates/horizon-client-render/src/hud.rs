@@ -59,6 +59,9 @@ impl TextureFlags {
     }
 }
 pub struct HudAtlas {
+    /// Identity of this packed atlas, used to invalidate cached model UV data
+    /// even when a resource reload places sprites at the same coordinates.
+    pub revision: u64,
     /// RGBA8, `width` by `height`, as built: empty once `pack_pixels` has
     /// compressed them (read them through `pixels()`).
     pub pixels: Vec<u8>,
@@ -129,7 +132,7 @@ pub const PACK_ICON_SIZE: u32 = 128;
 /// size of the largest trim texture.
 pub const TRIM_SLOTS: usize = 32;
 pub fn decode(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
-    decode_bytes(&fs::read(path)?)
+    decode_bytes(&horizon_core::prepared_files::read(path)?)
 }
 /// A PNG in memory as RGBA pixels.
 pub fn decode_bytes(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
@@ -181,9 +184,10 @@ fn within_budget(files: &[&PathBuf], budget: u64) -> HashSet<PathBuf> {
 }
 /// A PNG's width and height, from its header alone.
 fn png_size(path: &Path) -> Option<(u32, u32)> {
-    use std::io::Read;
-    let mut header = [0u8; 24];
-    fs::File::open(path).ok()?.read_exact(&mut header).ok()?;
+    let header: [u8; 24] = horizon_core::prepared_files::read_head(path, 24)
+        .ok()?
+        .try_into()
+        .ok()?;
     let field = |at: usize| u32::from_be_bytes(header[at..at + 4].try_into().unwrap_or_default());
     (header[..8] == *b"\x89PNG\r\n\x1a\n" && header[12..16] == *b"IHDR")
         .then(|| (field(16), field(20)))
@@ -362,7 +366,8 @@ fn cit_sprite(root: &Path, id: &str) -> Option<(PackedImage, Option<TextureFlags
             return None;
         }
     };
-    let mcmeta = fs::read_to_string(path.with_extension("png.mcmeta")).ok();
+    let mcmeta =
+        horizon_core::prepared_files::read_to_string(&path.with_extension("png.mcmeta")).ok();
     let animation = animation_of(mcmeta.as_deref());
     // Only an animation is cut to its first frame: a still CIT texture is drawn whole, and
     // armour layers are twice as wide as they are tall.
@@ -460,7 +465,10 @@ fn atlas_sprites(root: &Path, packed: &[PackedImage]) -> (Vec<PackedImage>, Vec<
                         // Animated strips keep their first frame and animate,
                         // like the packed files.
                         if path.starts_with("block/") || path.starts_with("item/") {
-                            let mcmeta = fs::read_to_string(file.with_extension("png.mcmeta")).ok();
+                            let mcmeta = horizon_core::prepared_files::read_to_string(
+                                &file.with_extension("png.mcmeta"),
+                            )
+                            .ok();
                             let animation = animation_of(mcmeta.as_deref());
                             animated = animation.is_some();
                             first_frame(image, animation.as_ref())
@@ -526,6 +534,10 @@ fn galactic_widths(
     widths
 }
 impl HudAtlas {
+    fn next_revision() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
     /// The atlas's pixels: as built, or uncompressed again after
     /// `pack_pixels` (a renderer being rebuilt).
     pub fn pixels(&self) -> std::borrow::Cow<'_, [u8]> {
@@ -700,6 +712,7 @@ impl HudAtlas {
         );
         let white = sprites["horizon/white"];
         Self {
+            revision: Self::next_revision(),
             font: crate::font::Font::load(
                 Path::new("horizon-boot"),
                 &sprites,
@@ -952,7 +965,9 @@ impl HudAtlas {
             let image = decode(path)
                 .map_err(|e| log::warn!("skipped GUI texture {}: {e}", path.display()))
                 .ok()?;
-            let mcmeta = fs::read_to_string(path.with_extension("png.mcmeta")).ok();
+            let mcmeta =
+                horizon_core::prepared_files::read_to_string(&path.with_extension("png.mcmeta"))
+                    .ok();
             let animation = animation_of(mcmeta.as_deref());
             // An animated strip keeps its first frame.
             let frames = name.starts_with("block/") || name.starts_with("item/");
@@ -1143,6 +1158,7 @@ impl HudAtlas {
             white,
         );
         Ok(Self {
+            revision: Self::next_revision(),
             galactic_widths: galactic_widths(&sprites, &pixels, width, height),
             pixels,
             packed: None,
@@ -2038,6 +2054,12 @@ impl HudRenderer {
             label: Some("HUD"),
             ..Default::default()
         });
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("HUD linear"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("HUD size"),
             contents: bytemuck::bytes_of(&HudUniform::new([1.0; 4], EndPortalFill::default())),
@@ -2088,6 +2110,12 @@ impl HudRenderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2113,6 +2141,10 @@ impl HudRenderer {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(glint_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&linear_sampler),
                 },
             ],
         });
@@ -2216,7 +2248,7 @@ impl HudRenderer {
                     operation: wgpu::BlendOperation::Add,
                 },
             },
-            "fs_main",
+            "fs_vignette",
             false,
         );
         // RenderPipelines.END_PORTAL: opaque.

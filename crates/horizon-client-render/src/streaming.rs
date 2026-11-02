@@ -173,6 +173,8 @@ pub trait LodSampler: Send {
     fn drain_details(&mut self) -> Vec<LodDetail> {
         Vec::new()
     }
+    /// A loaded chunk's summary, made on the far-terrain worker.
+    fn observed(&mut self, _key: (i32, i32), _columns: &Arc<[crate::lod::Column; 256]>) {}
     /// Reduced far detail (`graphics::FarDetail::Reduced`): `grid` may then
     /// approximate wide cells.
     fn set_approximate(&mut self, _approximate: bool) {}
@@ -182,6 +184,13 @@ pub trait LodSampler: Send {
     }
     fn reduced_column(&mut self, x: i32, z: i32, _width: i32) -> crate::lod::Column {
         self.column(x, z)
+    }
+    /// Whether a column since the last call was left empty because its data
+    /// is still on its way (a BlueMap tile downloading, nothing coarser to
+    /// stand in): that sample isn't drawn, what it would replace is
+    /// (`Lod::finish_any_sample`), and it is taken again later.
+    fn waited(&mut self) -> bool {
+        false
     }
     /// `side` x `side` columns from (`x`, `z`), `stride` blocks apart; none
     /// when sampling failed and should be tried again later.
@@ -201,6 +210,11 @@ pub trait LodSampler: Send {
 }
 pub trait LodSource: Send + Sync {
     fn sampler(self: Arc<Self>) -> Box<dyn LodSampler>;
+    /// Whether its samplers' `observed` chunks become its own (a server's
+    /// kept terrain): tiles sampled without one are sampled again.
+    fn keeps_observed(&self) -> bool {
+        false
+    }
 }
 struct GeneratorSampler<G: ChunkGenerator> {
     generator: Arc<G>,
@@ -234,6 +248,7 @@ impl<G: ChunkGenerator> Saves for G {
 struct MeshSettings {
     nether: bool,
     shader_pack_lighting: bool,
+    separate_ao: bool,
     zoom: BiomeZoom,
     blend_radius: i32,
     smooth_lighting: bool,
@@ -465,6 +480,9 @@ pub struct Streaming {
     /// A shader pack lights the faces: sections mesh without face shading
     /// (`Mesher::shader_pack_lighting`).
     pub shader_pack_lighting: bool,
+    /// OptiFine/Iris separate ambient occlusion: vertex RGB has pure tint and alpha holds AO factor
+    /// (`Mesher::separate_ao`).
+    pub separate_ao: bool,
     /// `BiomeManager`'s zoom seed (the hashed world seed) and `biomeBlendRadius`.
     pub biome_zoom: BiomeZoom,
     pub biome_blend: i32,
@@ -878,6 +896,7 @@ impl<G: ChunkGenerator> Jobs<G> {
                 let mut mesher = Mesher {
                     nether_shading: settings.nether,
                     shader_pack_lighting: settings.shader_pack_lighting,
+                    separate_ao: settings.separate_ao,
                     zoom: settings.zoom,
                     blend_radius: settings.blend_radius,
                     smooth_lighting: settings.smooth_lighting,
@@ -979,6 +998,7 @@ impl Streaming {
             sky_light: true,
             nether_shading: false,
             shader_pack_lighting: false,
+            separate_ao: false,
             biome_zoom: BiomeZoom::new(0),
             biome_blend: 2,
             smooth_lighting: true,
@@ -1920,6 +1940,7 @@ impl Streaming {
                         MeshSettings {
                             nether: self.nether_shading,
                             shader_pack_lighting: self.shader_pack_lighting,
+                            separate_ao: self.separate_ao,
                             zoom: self.biome_zoom,
                             blend_radius: self.biome_blend,
                             smooth_lighting: self.smooth_lighting,
@@ -2682,14 +2703,7 @@ fn keep_unchanged_sections(
 }
 /// Whether two sections' packed light (4,096 cells) holds the same values.
 fn same_light(a: &crate::chunk::Light, b: &crate::chunk::Light) -> bool {
-    use crate::chunk::Light;
-    match (a, b) {
-        (Light::Uniform(x), Light::Uniform(y)) => x == y,
-        (Light::Full(x), Light::Full(y)) => x == y,
-        (Light::Uniform(v), Light::Full(f)) | (Light::Full(f), Light::Uniform(v)) => {
-            f.iter().all(|c| c == v)
-        }
-    }
+    a.same_as(b)
 }
 /// Whether two biome containers (64 cells) hold the same values.
 fn same_values(
