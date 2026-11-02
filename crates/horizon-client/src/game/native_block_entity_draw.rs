@@ -43,7 +43,6 @@ fn in_frustum(frustum: Option<&impl Cull>, origin: Vec3, bounds: [f32; 6]) -> bo
 /// partial tick, game time and light, and the pose stack the helpers draw
 /// under (`native_draw_quad`, `native_draw_cube`, `native_draw_block`).
 // Native mods read and drive it; nothing in Horizon does.
-#[allow(dead_code)]
 pub struct BlockEntityDraw {
     /// The frame's partial tick, 0 to 1 (`BlockEntityRenderState`).
     pub partial: f32,
@@ -130,7 +129,7 @@ impl BlockEntityDraw {
     /// yours, and moves nothing by itself: an idle machine, not a turning
     /// shaft. Kept geometry stands still: an enchanted item's glint, and an
     /// item drawn with `native_draw_item` whose model reads the time (a clock,
-    /// a compass), stop where they were. API @API:block_entity_keep@.
+    /// a compass), stop where they were. API 94.
     pub fn keep(&mut self) {
         self.kept = true;
     }
@@ -174,7 +173,6 @@ impl BlockEntityDraw {
 /// One face of a `native_draw_cube` box: its sprite (`mymod:entity/cog`,
 /// `mymod:block/casing`) and its UVs in texels of 16 per side, as a model
 /// face's `uv` (none takes the box's own, as a model's default).
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub struct CubeFace<'a> {
     pub sprite: &'a str,
@@ -492,7 +490,7 @@ impl Game<'_> {
     /// are multiplied by the 0xRRGGBB `tint` (0xFFFFFF for none), the
     /// others drawn as they are. False when the model isn't baked: not
     /// named, missing from the resources, or on a side that draws nothing.
-    /// API @API:standalone_models@.
+    /// API 151.
     pub(super) fn native_draw_model(
         &self,
         draw: &mut BlockEntityDraw,
@@ -522,7 +520,7 @@ impl Game<'_> {
     /// client's copy of a block entity has no item slots (`entity.items` is
     /// empty there): send the stacks you draw in
     /// `native_block_entity_update_tag` and read them from `entity.nbt`.
-    /// API @API:block_entity_draw_item@.
+    /// API 91.
     pub(super) fn native_draw_item(
         &self,
         draw: &mut BlockEntityDraw,
@@ -545,7 +543,7 @@ impl Game<'_> {
 
     /// Property `key` of block state `state` (a machine's `facing`, from the
     /// `state` `native_block_entity_submit` gets), if it has one: no lookup in
-    /// the world, so cheap each frame. API @API:block_entity_draw_item@.
+    /// the world, so cheap each frame. API 91.
     pub(super) fn native_block_state_property(
         &self,
         state: BlockStateId,
@@ -558,6 +556,11 @@ impl Game<'_> {
             .properties
             .get(key)
             .map(String::as_str)
+    }
+    /// The block `state` is a state of: its name, as `GameLevel`'s helper of
+    /// the same name gives it for the hooks that get a state in the world.
+    pub(super) fn native_state_block(&self, state: BlockStateId) -> Option<&str> {
+        self.pack.assets.registry.state(state).map(|s| &*s.name)
     }
 }
 

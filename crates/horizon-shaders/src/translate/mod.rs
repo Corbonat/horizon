@@ -29,6 +29,7 @@ use crate::Preprocessed;
 
 mod atomic_vectors;
 mod geometry;
+mod image_parameters;
 mod ordering;
 mod rewrite;
 mod scan;
@@ -980,7 +981,14 @@ pub(super) fn split_sampler(ty: &str) -> (String, &'static str) {
 
 /// Parses and validates one stage; errors at the pack's files and lines.
 fn compile(stage: &Stage, text: &str, header_lines: usize) -> Result<naga::Module, Vec<Error>> {
-    // `text` is the source the span is in: the rewrites below keep its lines.
+    let specialized = image_parameters::rewrite(text).map_err(|message| {
+        vec![Error {
+            file: stage.pp.files.first().cloned().unwrap_or_default(),
+            line: 1,
+            message,
+        }]
+    })?;
+    let text = specialized.as_str();
     let at = |text: &str, span: naga::Span, message: String| {
         let start = span.to_range().map_or(0, |r| r.start);
         let line = text[..start.min(text.len())].matches('\n').count();
@@ -2200,5 +2208,201 @@ mod tests {
             Target::Buffers,
         );
         assert!(p.is_ok(), "{:?}", p.err());
+    }
+
+    /// Parameters and locals named like a bool uniform hide it (GLSL 4.60, 4.2): the uniform is
+    /// only rewritten where it is the name in scope, and a prototype's parameter ends with it.
+    #[test]
+    fn parameters_and_locals_named_like_bool_uniforms_hide_them() {
+        let fsh = "#version 330\nuniform bool hideGUI;\nout vec4 c;\n\
+                   float f(in bool hideGUI) { return hideGUI ? 1.0 : 0.0; }\n\
+                   float g() { bool hideGUI = gl_FragCoord.x > 0.5; return hideGUI ? 2.0 : 0.0; }\n\
+                   float h(bool hideGUI);\n\
+                   void main() { c = vec4(f(true), g(), h(false), hideGUI ? 1.0 : 0.0); }\n\
+                   float h(bool hideGUI) { return hideGUI ? 3.0 : 0.0; }\n";
+        let p = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fsh)],
+            Target::Buffers,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let arg = |name: &str| {
+            let (_, f) = (p.fragment.functions.iter())
+                .find(|(_, f)| f.name.as_deref() == Some(name))
+                .unwrap();
+            f.arguments[0].name.clone()
+        };
+        assert_eq!(arg("f").as_deref(), Some("hideGUI"));
+        assert_eq!(arg("h").as_deref(), Some("hideGUI"));
+        assert!(p.interface.uniforms.iter().any(|u| u.name == "hideGUI"));
+        // `main` reads the uniform as an int compared with zero; `f`, `g` and `h` do not.
+        assert!(reads_bool_uniform(&p));
+        for name in ["f", "g", "h"] {
+            let (_, func) = (p.fragment.functions.iter())
+                .find(|(_, f)| f.name.as_deref() == Some(name))
+                .unwrap();
+            let uses = func.expressions.iter().any(|(_, e)| {
+                matches!(
+                    e,
+                    naga::Expression::Binary {
+                        op: naga::BinaryOperator::NotEqual,
+                        ..
+                    }
+                )
+            });
+            assert!(!uses, "{name} read the uniform instead of its own hideGUI");
+        }
+    }
+
+    /// A struct member and a member access named like a bool uniform stay plain.
+    #[test]
+    fn members_named_like_bool_uniforms_stay_plain() {
+        let fsh = "#version 330\nuniform bool hideGUI;\nout vec4 c;\n\
+                   struct S { bool hideGUI; float x; };\n\
+                   float f(S v) { return v.hideGUI ? 1.0 : 0.0; }\n\
+                   void main() { S s = S(true, 1.0); c = vec4(f(s), hideGUI ? 1.0 : 0.0, 0.0, 1.0); }\n";
+        let p = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fsh)],
+            Target::Buffers,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(reads_bool_uniform(&p));
+    }
+
+    /// Whether `hz_main` compares an int uniform with zero (a bool uniform read).
+    fn reads_bool_uniform(p: &Program) -> bool {
+        let (_, main) = (p.fragment.functions.iter())
+            .find(|(_, f)| f.name.as_deref() == Some("hz_main"))
+            .unwrap();
+        main.expressions.iter().any(|(_, e)| {
+            matches!(
+                e,
+                naga::Expression::Binary {
+                    op: naga::BinaryOperator::NotEqual,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// A `for` header's variable (and a second declarator) hide the uniform to the loop's end.
+    #[test]
+    fn for_header_and_second_declarators_hide_bool_uniforms() {
+        let fsh = "#version 330\nuniform bool hideGUI;\nout vec4 c;\n\
+                   void main() {\n    float t = 0.0;\n    \
+                   for (bool hideGUI = false; t < 2.0; t += 1.0) { t += hideGUI ? 1.0 : 0.0; }\n    \
+                   for (int i = 0, hideGUI = 3; i < 2; i++) { t += float(hideGUI); }\n    \
+                   bool a = true, hideGUI = false, b = a;\n    t += hideGUI ? 1.0 : 0.0;\n    \
+                   c = vec4(t, b ? 1.0 : 0.0, 0.0, 1.0);\n}\n";
+        let p = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fsh)],
+            Target::Buffers,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!reads_bool_uniform(&p), "the local hides the uniform");
+        let fsh = "#version 330\nuniform bool hideGUI;\nout vec4 c;\n\
+                   void main() {\n    float t = 0.0;\n    \
+                   for (bool hideGUI = false; t < 2.0; t += 1.0) { t += hideGUI ? 1.0 : 0.0; }\n    \
+                   for (int i = 0, k = 3; i < 2; i++) { t += float(k); }\n    \
+                   c = vec4(t, hideGUI ? 1.0 : 0.0, 0.0, 1.0);\n}\n";
+        let p = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fsh)],
+            Target::Buffers,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(reads_bool_uniform(&p), "the uniform is back after the loop");
+    }
+
+    /// A `for` loop with a single-statement body: its variable hides the uniform to the `;`.
+    #[test]
+    fn unbraced_for_body_ends_the_hiding_at_its_statement() {
+        let fsh = "#version 330\nuniform bool hideGUI;\nout vec4 c;\n\
+                   void main() {\n    float t = 0.0;\n    \
+                   for (bool hideGUI = false; t < 2.0; t += 1.0) t += hideGUI ? 1.0 : 0.0;\n    \
+                   c = vec4(t, hideGUI ? 1.0 : 0.0, 0.0, 1.0);\n}\n";
+        let p = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fsh)],
+            Target::Buffers,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(reads_bool_uniform(&p));
+        // The body is a `return`, which the translator rewrites on its own.
+        let fsh = "#version 330\nuniform bool hideGUI;\nout vec4 c;\n\
+                   float f(float t) {\n    \
+                   for (bool hideGUI = false; t < 2.0; t += 1.0) return hideGUI ? 1.0 : t;\n    \
+                   return hideGUI ? 1.0 : 0.0;\n}\n\
+                   void main() { c = vec4(f(0.0)); }\n";
+        let p = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fsh)],
+            Target::Buffers,
+        );
+        assert!(p.is_ok(), "{:?}", p.err());
+    }
+
+    /// A sampler parameter's name reused as a local of an inner block, then read again.
+    #[test]
+    fn sampler_parameter_is_back_after_the_block_of_a_local() {
+        let fsh = "#version 330\nuniform sampler2D colortex1;\nin vec2 uv;\nout vec4 color;\n\
+                   vec4 f(sampler2D tex, vec2 c) {\n    vec4 r = vec4(0.0);\n    \
+                   if (c.x > 0.5) { float tex = 2.0; r += vec4(tex); }\n    \
+                   return r + texture(tex, c);\n}\n\
+                   void main() { color = f(colortex1, uv); }\n";
+        let p = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fsh)],
+            Target::Buffers,
+        );
+        assert!(p.is_ok(), "{:?}", p.err());
+    }
+
+    /// A local in an inner block hides the uniform only to the block's end.
+    #[test]
+    fn bool_uniform_is_back_after_the_block_of_a_local() {
+        let fsh = "#version 330\nuniform bool hideGUI;\nout vec4 c;\n\
+                   void main() {\n    c = vec4(0.0);\n    \
+                   if (gl_FragCoord.x > 0.5) { bool hideGUI = true; c.r = hideGUI ? 1.0 : 0.0; }\n    \
+                   c.a = hideGUI ? 1.0 : 0.0;\n}\n";
+        let p = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fsh)],
+            Target::Buffers,
+        );
+        let p = p.unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            reads_bool_uniform(&p),
+            "the uniform is back after the block"
+        );
+    }
+
+    #[test]
+    fn storage_buffer_extension_keeps_the_legacy_buffer_keyword() {
+        let fragment = "#version 130\n#extension GL_ARB_shader_storage_buffer_object : enable\nlayout(std430,binding=0) readonly buffer Data{uvec4 cells[4];}data;void main(){gl_FragColor=vec4(data.cells[0]);}";
+        let result = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fragment)],
+            Target::Window,
+        );
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+    #[test]
+    fn ordinary_legacy_buffer_identifiers_still_translate() {
+        let fragment = "#version 120\nvoid main(){float buffer=0.5;gl_FragColor=vec4(buffer);}";
+        let result = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fragment)],
+            Target::Window,
+        );
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+}
+
+#[cfg(test)]
+mod image_parameter_tests {
+    use crate::{Macros, Pack, preprocess, translate_compute};
+    #[test]
+    fn nested_image_helpers_specialize_multiple_storage_formats() {
+        let src = "#version 430\nlayout(local_size_x=1)in;layout(rgba16f) uniform image3D imageA;layout(r32f) uniform image3D imageB;void write_value(writeonly image3D img,ivec3 p){imageStore(img,p,vec4(0.5));}\nvoid nested(image3D img,ivec3 p){write_value(img,p);}\nvoid main(){nested(imageA,ivec3(0));nested(imageB,ivec3(0));}";
+        let pack = Pack::from_zip_bytes(
+            "formats.zip",
+            crate::pack::tests::zip(&[("shaders/setup.csh", src)]),
+        )
+        .unwrap();
+        let result = translate_compute(&preprocess(&pack, "setup.csh", &Macros::standard()));
+        assert!(result.is_ok(), "{:?}", result.err());
     }
 }

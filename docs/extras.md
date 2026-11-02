@@ -179,7 +179,8 @@ and the container screen tests are unchanged).
 ### Splitscreen (`splitscreen`, default off)
 
 **Options → Horizon Settings... → Splitscreen...** turns local joining on or off at once.
-In P1's single-player world, another controller can press a button, then A to join. Each
+In P1's single-player world, a controller P1 isn't using can press a button, then A to join
+(or Y to play as P1, while P1 has no controller). Each
 player picks an instance-local profile with its own options and saved progress. LB/RB on
 the profile page move the view between shared positions, a new window or another monitor.
 A joined player's **Splitscreen Settings** in the pause menu switches profiles in place;
@@ -188,7 +189,12 @@ P1 is alone, turning it off restores the normal controller reader. Leaving it on
 alone keeps watching for joins without a compositor.
 
 `HORIZON_SPLIT=N` remains a testing shortcut to enable it and add N-1 players.
-The Setup map and joining P1 on an external server are separate follow-ups.
+The Setup map previews the monitors, windows and player views. Click a player and choose a
+window or monitor, then **Apply** to move the actual views. **Revert** and **Done** discard
+unapplied moves. An emptied window closes only on Apply. A player joining or leaving resets
+the draft so it cannot apply a move to the wrong seat. P1's pause-menu shortcut opens Setup;
+another player's shortcut opens their profiles. Dragging, controller pick-up and joining P1
+on an external server follow separately.
 
 ## Shared rules
 
