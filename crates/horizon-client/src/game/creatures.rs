@@ -3811,38 +3811,35 @@ impl Game<'_> {
                     who: Who::Mob(id),
                     at,
                 } = hit
-            {
-                if self
+                && self
                     .mobs
                     .iter()
                     .any(|m| m.id == id && m.alive() && m.species() == Species::Breeze)
-                {
-                    // A later target in the same piercing collection can deflect too.
-                    super::wind::reverse(&mut p, jitter);
-                    self.finish_arrow_hit(p, EntityHit::Deflected);
-                    self.audio.play(
-                        "minecraft:entity.breeze.deflect",
-                        Some([at.x, at.y, at.z]),
-                        1.0,
-                        1.0,
-                    );
-                    continue;
-                }
+            {
+                // A later target in the same piercing collection can deflect too.
+                super::wind::reverse(&mut p, jitter);
+                self.finish_arrow_hit(p, EntityHit::Deflected);
+                self.audio.play(
+                    "minecraft:entity.breeze.deflect",
+                    Some([at.x, at.y, at.z]),
+                    1.0,
+                    1.0,
+                );
+                continue;
             }
             if let Hit::Entity {
                 who: Who::Mob(id), ..
             } = hit
+                && let Some((_, entity)) = wind_ids.iter().find(|(target, _)| *target == id)
             {
-                if let Some((_, entity)) = wind_ids.iter().find(|(target, _)| *target == id) {
-                    let look = self.owner_look(p.owner, p.guest);
-                    if let Some(wind) = self
-                        .creatures
-                        .projectiles
-                        .iter_mut()
-                        .find(|q| q.id == *entity)
-                    {
-                        super::deflect::aim_deflect(wind, look, p.owner, p.owner_uuid, p.guest);
-                    }
+                let look = self.owner_look(p.owner, p.guest);
+                if let Some(wind) = self
+                    .creatures
+                    .projectiles
+                    .iter_mut()
+                    .find(|q| q.id == *entity)
+                {
+                    super::deflect::aim_deflect(wind, look, p.owner, p.owner_uuid, p.guest);
                 }
             }
             if arrow_hit {
