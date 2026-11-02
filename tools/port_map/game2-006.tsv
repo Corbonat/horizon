@@ -33,7 +33,7 @@ Projectile.canBreakBlockInAdventureMode	missing		a projectile's block breaking i
 Projectile.spawnProjectileFromRotation	port	crates/horizon-client/src/projectiles.rs::Projectile::shoot_from_rotation	gap: minor: the aim and inherited velocity only; the add-to-world step is the caller's
 Projectile.spawnProjectile	inline	crates/horizon-client/src/game/creatures.rs::Game::throw_item	each shooter adds its own projectile (throw_item, shoot_crossbow, shoot_projectile_item, the bow in game.rs); throw_item is the player throw path
 Projectile.applyOnProjectileSpawned	port	crates/horizon-client/src/game/enchant_effects.rs::Game::bow_projectile_ignite	gap: minor: Flame ignite only; Piercing and Punch go through Projectile::set_bonus
-Projectile.hitTargetOrDeflectSelf	port	crates/horizon-client/src/game/creatures.rs::Game::tick_projectiles	gap: minor: deflection is checked for breezes only; the onHit dispatch is creatures.rs projectile_hit
+Projectile.hitTargetOrDeflectSelf	port	crates/horizon-client/src/game/creatures.rs::Game::projectile_hits	gap: minor: entity deflection remains Breeze-specific; first boundary in tick_projectile; wind/default dispatch and ordered arrow continuation use projectile_hits and arrows::resume_entity_hit
 Projectile.onRedirectProjectile	port	crates/horizon-client/src/game/deflect.rs::Game::deflect	gap: minor: the player's attack turns the projectile; a projectile hitting another redirectable one is not modelled
 Projectile.recreateFromPacket	port	crates/horizon-client/src/game/remote_projectiles.rs::Game::spawn_remote_projectile	the owner id from the add-entity data is set on the remote projectile
 Projectile.mayBreak	port	crates/horizon-client/src/game/creatures.rs::Game::projectile_breaks_block	impact projectiles break chorus flowers, decorated pots (cracked first) and speleothems, gated on mayInteract, mayBreak and the projectiles_can_break_blocks rule
@@ -55,14 +55,14 @@ AbstractArrow.<init>	port	crates/horizon-client/src/arrows.rs::ArrowState::new	a
 AbstractArrow.defineSynchedData	skip:java		flags, pierce level and in-ground sync fields; Horizon keeps them on ArrowState and Projectile
 AbstractArrow.lerpMotion	skip:other		client interpolation of a server motion packet; Horizon's remote arrows take the server position each update
 AbstractArrow.onSyncedDataUpdated	inline	crates/horizon-client/src/arrows.rs::Ticker::on_hit_block	the 7-tick shake starts when the arrow lands here; vanilla starts it when the client sees it stuck
-AbstractArrow.hitTargetsOrDeflectSelf	port	crates/horizon-client/src/arrows.rs::resume_entity_hit	ordered piercing collection resumes within the same tick after synchronous entity hit effects; deflection or removal terminates it
+AbstractArrow.hitTargetsOrDeflectSelf	port	crates/horizon-client/src/game/creatures.rs::Game::projectile_hits	drives the ordered same-segment collection from Ticker::step_with_hit via resume_entity_hit after synchronous hit effects; removal or deflection stops continuation
 AbstractArrow.addBubbleParticles	port	crates/horizon-client/src/projectiles.rs::Projectile::arrow_trail	four bubble particles along a submerged arrow
 AbstractArrow.move	inline	crates/horizon-client/src/arrows.rs::Ticker::tick	should_fall then start_falling run from the tick for an arrow in the ground
 AbstractArrow.resetPiercedEntities	inline	crates/horizon-client/src/arrows.rs::Ticker::on_hit_block	the pierced list is cleared when the arrow lands
 AbstractArrow.doKnockback	port	crates/horizon-client/src/game/creatures.rs::Game::projectile_hit	punch pushes along the flight, scaled by 0.6 and by knockback resistance
 AbstractArrow.findHitEntity	port	crates/horizon-client/src/arrows.rs::Ticker::entity_hit	box clip, then the margin test against the segment
-AbstractArrow.findHitEntities	port	crates/horizon-client/src/arrows.rs::Ticker::step_move_and_hit	gap: minor: only the nearest hit per tick is returned; a piercing arrow takes the rest on later ticks
-AbstractArrow.canHitEntity	port	crates/horizon-client/src/arrows.rs::Ticker::step_move_and_hit	gap: minor: skips pierced entities here; the player canHarmPlayer rule is in creatures.rs tick_projectiles
+AbstractArrow.findHitEntities	port	crates/horizon-client/src/arrows.rs::Ticker::step_with_hit	stable same-segment collection with pierce capacity and previous-hit ignores; Game dispatches synchronously before continuation searches again
+AbstractArrow.canHitEntity	port	crates/horizon-client/src/arrows.rs::Ticker::step_with_hit	skips previously pierced entities in the collector; gap: minor: player canHarmPlayer remains in Game's guest/PvP path, not this collector
 AbstractArrow.readAdditionalSaveData	port	crates/horizon-client/src/entity_nbt.rs::arrow_from_nbt	shake, in ground, in block state, pickup and the arrow fields
 AbstractArrow.tryPickup	port	crates/horizon-client/src/arrows.rs::ArrowState::player_touch	disallowed, allowed (gives the pickup item) and creative only
 AbstractArrow.setFlag	port	crates/horizon-client/src/projectiles.rs::Projectile::set_critical	gap: minor: only the critical flag; the no-physics flag is a plain field

@@ -3588,6 +3588,7 @@ impl Game<'_> {
         }
     }
 
+    /// Horizon server scheduling: finish each projectile's impacts before the next turn.
     fn tick_projectiles(&mut self) -> Result<()> {
         let mut projectiles = std::mem::take(&mut self.creatures.projectiles);
         let order: Vec<_> = projectiles.iter().map(|p| p.id).collect();
@@ -3853,7 +3854,8 @@ impl Game<'_> {
         Ok(())
     }
 
-    /// Finish this projectile's impacts before the next entity ticks.
+    /// `Projectile.hitTargetOrDeflectSelf` and `AbstractArrow.hitTargetsOrDeflectSelf`:
+    /// finish this projectile's ordered impacts before the next entity ticks.
     fn projectile_hits(
         &mut self,
         hits: Vec<(Projectile, Hit)>,
@@ -4269,9 +4271,8 @@ impl Game<'_> {
             tnt_explodes: self.ui.rules.bool("tnt_explodes"),
         }
     }
-    /// The rest of the tick of an arrow that hit an entity
-    /// (`arrows::finish_entity_hit`): its sounds and drop, and back among the
-    /// projectiles if it flies on.
+    /// `AbstractArrow.onHitEntity` completion bridge: apply `arrows::finish_entity_hit`,
+    /// deliver its sounds and drop, and list the arrow again if it flies on.
     fn finish_arrow_hit(&mut self, mut arrow: Projectile, outcome: EntityHit) {
         if let Some(i) = self
             .creatures

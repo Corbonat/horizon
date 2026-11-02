@@ -1,8 +1,9 @@
 //! Projectile impacts for native mods (`native_projectile_impact`, NeoForge's
-//! `ProjectileImpactEvent`). `tick_projectiles` flies every projectile first and
-//! collects the impacts; once its worlds are let go, the mods hear each one, and a
-//! projectile whose impact a mod canceled flies the tick again from where it was,
-//! through whatever it hit.
+//! `ProjectileImpactEvent`). First-impact settlement precedes that projectile's
+//! default hit and the next projectile turn; resumed arrows dispatch at each continuation.
+//! Cancellation replays the first whole movement or only the resumed continuation.
+//! First entity-hit arrows are unlisted during the first callback: a synchronous
+//! selector cannot remove that active arrow (separately tracked `first_remove` bug).
 use super::{
     Game,
     creatures::{ProjWorld, wind_charge_hit},

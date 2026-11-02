@@ -229,6 +229,7 @@ impl PartialEq for ArrowState {
     }
 }
 impl ArrowState {
+    /// `AbstractArrow.<init>` defaults; suspended flight is Horizon bookkeeping.
     pub fn new(random: LegacyRandom) -> Self {
         Self {
             in_ground: false,
@@ -593,8 +594,8 @@ pub enum EntityHit {
     /// flies on and falls to the ground.
     Dodged,
 }
-/// Apply the entity-hit outcome: whether to keep the arrow. A piercing flight
-/// waits for `resume_entity_hit` before the tick's final drag and gravity.
+/// `AbstractArrow.onHitEntity`: apply its outcome and report whether the arrow survives.
+/// A piercing flight waits for `resume_entity_hit` before final drag and gravity.
 pub fn finish_entity_hit(p: &mut Projectile, scene: &ArrowScene, outcome: EntityHit) -> bool {
     let Some(mut st) = p.arrow.take() else {
         return false;
@@ -654,6 +655,8 @@ pub fn resume_entity_hit_through(
 ) -> Option<(bool, Hit)> {
     resume_with(p, scene, targets, false)
 }
+/// `AbstractArrow.stepMoveAndHit` / `AbstractArrow.hitTargetsOrDeflectSelf` continuation.
+/// Native cancellation skips the remaining hits and completes the original movement.
 fn resume_with(
     p: &mut Projectile,
     scene: &ArrowScene,
