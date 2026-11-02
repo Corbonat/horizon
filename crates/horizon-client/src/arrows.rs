@@ -205,6 +205,7 @@ pub struct ArrowState {
 #[derive(Clone)]
 struct Flight {
     end: Vec3,
+    movement_end: Vec3,
     targets: Vec<(Who, Vec3)>,
     block: Option<(Vec3, BlockPos, [i32; 3])>,
 }
@@ -642,7 +643,7 @@ pub fn resume_entity_hit(
     resume_with(p, scene, targets, true)
 }
 /// A resumed impact canceled by `ProjectileImpactEvent`: preserve the earlier
-/// hits, move to this impact, and finish the tick without hurting or sticking.
+/// hits and fly the full original movement without hurting or sticking.
 pub fn resume_entity_hit_through(
     p: &mut Projectile,
     scene: &ArrowScene,
@@ -666,22 +667,28 @@ fn resume_with(
         st: &mut st,
         scene,
     };
-    let hit = if !flight.targets.is_empty() {
+    let hit = if !impact {
+        let from = ticker.p.position;
+        ticker.p.position = flight.movement_end;
+        ticker.apply_effects_from_blocks(from, flight.movement_end);
+        ticker.st.canceled_impact_inside = true;
+        Hit::None
+    } else if !flight.targets.is_empty() {
         let (who, at) = flight.targets.remove(0);
-        if impact {
-            ticker.st.flight = Some(flight);
-            ticker.entity_target(who, at)
-        } else {
-            let from = ticker.p.position;
-            ticker.p.position = at;
-            ticker.apply_effects_from_blocks(from, at);
-            Hit::None
-        }
+        ticker.st.flight = Some(flight);
+        ticker.entity_target(who, at)
     } else {
         // Vanilla repeats the search after the collection has been handled:
         // hit effects may have changed the entities along the original path.
         let from = ticker.p.position;
-        ticker.step_with_hit(from, flight.end, targets, impact, flight.block)
+        ticker.step_with_hit(
+            from,
+            flight.end,
+            flight.movement_end,
+            targets,
+            impact,
+            flight.block,
+        )
     };
     if !matches!(hit, Hit::Entity { .. }) {
         ticker.st.flight = None;
@@ -933,7 +940,7 @@ impl Ticker<'_, '_, '_, '_> {
             .then(|| self.block_position());
         let block = self.scene.clip(from, to, ignored);
         let end = block.map_or(to, |b| b.0);
-        self.step_with_hit(from, end, targets, impact, block)
+        self.step_with_hit(from, end, to, targets, impact, block)
     }
     /// `AbstractArrow.stepMoveAndHit` retains its original BlockHitResult
     /// throughout the entity-hit loop, including an endpoint on a block face.
@@ -941,6 +948,7 @@ impl Ticker<'_, '_, '_, '_> {
         &mut self,
         from: Vec3,
         end: Vec3,
+        movement_end: Vec3,
         targets: &[(Who, Aabb)],
         impact: bool,
         block: Option<(Vec3, BlockPos, [i32; 3])>,
@@ -982,6 +990,7 @@ impl Ticker<'_, '_, '_, '_> {
             if self.st.pierce > 0 {
                 self.st.flight = Some(Flight {
                     end,
+                    movement_end,
                     targets: hits.into_iter().map(|(who, at, _)| (who, at)).collect(),
                     block,
                 });

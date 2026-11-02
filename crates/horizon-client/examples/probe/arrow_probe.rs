@@ -76,9 +76,9 @@ pub fn main() -> Result<()> {
         // Horizon's native impact-cancellation contract, separate from the
         // vanilla differential corpus: an earlier hit remains applied, but a
         // canceled secondary entity/block impact neither hurts nor sticks.
-        for block in [false, true] {
+        for (block, inside) in [(false, false), (true, false), (true, true)] {
             let air = assets.registry.default_state("minecraft:air").unwrap();
-            for x in 22..28 {
+            for x in 22..32 {
                 for y in 4..7 {
                     for z in 23..26 {
                         scene.set(x, y, z, air)?;
@@ -86,7 +86,7 @@ pub fn main() -> Result<()> {
                 }
             }
             scene.set(
-                25,
+                if inside { 26 } else { 25 },
                 5,
                 24,
                 assets
@@ -118,7 +118,9 @@ pub fn main() -> Result<()> {
                 Vec3::new(22.0, 5.5, 24.0),
                 None,
             );
-            p.velocity = Vec3::new(5.0, 0.0, 0.0);
+            let speed = if inside { 4.5 } else { 5.0 };
+            let end = Vec3::new(if inside { 26.5 } else { 27.0 }, 5.5, 24.0);
+            p.velocity = Vec3::new(speed, 0.0, 0.0);
             let a = p.arrow.as_mut().unwrap();
             a.pierce = 1;
             a.fire_ticks = 100;
@@ -127,6 +129,13 @@ pub fn main() -> Result<()> {
             if !block {
                 targets.push((Who::Mob(3), box_at(24.5, 25.1)));
             }
+            let mut first = p.clone();
+            assert_eq!(
+                arrows::tick_through(&mut first, &view, &targets),
+                (true, Hit::None)
+            );
+            assert_eq!(first.position, end);
+            assert_eq!(first.age, 1);
             assert!(matches!(
                 arrows::tick(&mut p, &view, &targets).1,
                 Hit::Entity {
@@ -159,12 +168,24 @@ pub fn main() -> Result<()> {
             assert!(!a.in_ground && !a.removed && !canceled.stuck);
             assert_eq!(a.fire_ticks, 99);
             assert_eq!(canceled.age, 1);
-            assert_eq!(canceled.position.x, if block { 25.0 } else { 24.5 });
+            // The landed native contract flies the full movement on cancellation,
+            // including when an earlier piercing hit has already been accepted.
+            assert_eq!(canceled.position, end);
+            assert!(a.canceled_impact_inside);
+            assert!(
+                !a.events
+                    .iter()
+                    .any(|e| matches!(e, ArrowEvent::Block { .. }))
+            );
             assert_eq!(
                 canceled.velocity,
-                Vec3::new(5.0 * f64::from(0.99f32), -0.05, 0.0)
+                Vec3::new(speed * f64::from(0.99f32), -0.05, 0.0)
             );
             assert!(arrows::resume_entity_hit(&mut canceled, &view, &targets).is_none());
+            assert_eq!(arrows::tick(&mut canceled, &view, &[]), (true, Hit::None));
+            assert!(!canceled.stuck && !canceled.arrow.as_ref().unwrap().in_ground);
+            assert!(canceled.position.x > end.x);
+            assert_eq!(canceled.age, 2);
         }
         println!("secondary entity/block cancellation preserves prior hits and finishes once");
         return Ok(());
