@@ -4101,7 +4101,7 @@ impl Game<'_> {
         }
         self.creatures.projectiles.append(projectiles);
         self.projectile_hits(hits, &wind_ids, hear, jitter)?;
-        *projectiles = std::mem::take(&mut self.creatures.projectiles);
+        *projectiles = std::mem::take(&mut self.creatures.projectiles).into();
         Ok(())
     }
 
