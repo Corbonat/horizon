@@ -174,8 +174,9 @@ impl ProjectileWorld for ProjWorld<'_, '_> {
 
 /// `AbstractWindCharge` is pickable, so a thrown pearl's
 /// `ProjectileUtil.getEntityHitResult` can strike it (`ThrownEnderpearl.onHit`).
-/// `WIND_CHARGE_IDS + j` is `projectiles[j]` during `tick_projectiles`, below
-/// the dragon's reserved ids.
+/// Initial collision snapshots use `WIND_CHARGE_IDS + j` for `projectiles[j]`;
+/// same-flight continuations retain the identity mapping when membership changes.
+/// All these synthetic ids stay below the dragon's reserved ids.
 const WIND_CHARGE_IDS: u32 = super::dragon::SPECIAL - 0x10000;
 
 /// The index of the wind charge a `wind_charge_hitboxes` id stands for.
@@ -534,7 +535,7 @@ impl Game<'_> {
     /// the only one this wears: it loses `max(1, damage / 4)` durability,
     /// Unbreaking applied, and at its maximum the slot empties and the break
     /// event goes out (`LivingEntity.entityEventForEquipmentBreak`: 65 for the
-    /// body — 49 to 52 are the four armour slots, which only a player's own
+    /// body Р Р†Р вЂљРІР‚Сњ 49 to 52 are the four armour slots, which only a player's own
     /// pieces reach). A fire hit leaves a fire-resistant piece alone
     /// (`ItemStack.canBeHurtBy`).
     fn hurt_mob_armor(&mut self, id: u32, damage: f32, kind: horizon_client::mobs::DamageKind) {
@@ -557,8 +558,8 @@ impl Game<'_> {
         // A piece's maximum, or none when it may not lose durability at all.
         // `doHurtEquipment` starts from the item's `equippable` component
         // (`Equippable equippable = item.get(DataComponents.EQUIPPABLE)`), so a
-        // damageable item with no such component — a sword put in a horse's body
-        // slot by `/item replace` — never wears; `equip_damage_on_hurt` alone
+        // damageable item with no such component Р Р†Р вЂљРІР‚Сњ a sword put in a horse's body
+        // slot by `/item replace` Р Р†Р вЂљРІР‚Сњ never wears; `equip_damage_on_hurt` alone
         // cannot say that, since it defaults to true when the component is absent.
         fn wearable(me: &Game<'_>, stack: &ItemStack, fire: bool, name: &str) -> Option<u32> {
             let info = me.res.items().get(&stack.item)?;
@@ -3906,6 +3907,16 @@ impl Game<'_> {
         let mut trails = Vec::new();
         let mut bubble_tops = Vec::new();
         let mut snow_contacts = Vec::new();
+        #[derive(Default)]
+        struct EffectEnds {
+            snow: usize,
+            shoots: usize,
+            trails: usize,
+            bubbles: usize,
+            deflections: usize,
+            arrows: usize,
+        }
+        let mut effect_ends = Vec::new();
         let mut keep_flags = vec![true; projectiles.len()];
         let mut impacts: Vec<Impact> = Vec::new();
         {
@@ -4111,6 +4122,14 @@ impl Game<'_> {
                     }
                     keep_flags[i] = keep;
                 }
+                effect_ends.push(EffectEnds {
+                    snow: snow_contacts.len(),
+                    shoots: shoot_events.len(),
+                    trails: trails.len(),
+                    bubbles: bubble_tops.len(),
+                    deflections: deflections.len(),
+                    arrows: arrow_events.len(),
+                });
                 // A block reaction or a native game-event hook can mutate the
                 // level even without a default hit. Deliver it before continuing.
                 let effects = &arrow_events[effects_from..];
@@ -4129,49 +4148,73 @@ impl Game<'_> {
                 }
             }
         }
-        for (block, position, movement) in snow_contacts {
-            self.powder_snow_particle(block, position, movement);
-        }
-        let listed = keep_flags.clone();
-        let mut idx = 0;
-        projectiles.retain(|_| {
-            let k = keep_flags[idx];
-            idx += 1;
-            k
-        });
-        if !impacts.is_empty() {
-            self.native_settle_impacts(projectiles, &listed, impacts, &mut hits, &mut arrow_events);
-        }
-        for (owner, guest, at) in shoot_events {
-            if let Some(conn) = guest.filter(|conn| self.lan_acting != Some(*conn)) {
-                let dispatched = if let Some(mut host) = self.lan.take() {
-                    let result = self.as_guest(&mut host, conn, |g| {
-                        g.projectile_event("minecraft:projectile_shoot", owner, at);
-                    });
-                    self.lan = Some(host);
-                    result.is_some()
-                } else {
-                    false
-                };
-                // An owner who left cannot resolve to the host. The event
-                // still occurs, with no resolved owner (Projectile.getOwner).
-                if !dispatched {
-                    self.projectile_event("minecraft:projectile_shoot", None, at);
-                }
-            } else {
-                self.projectile_event("minecraft:projectile_shoot", owner, at);
+        let mut from = EffectEnds::default();
+        let last = effect_ends.len().checked_sub(1);
+        for (turn, until) in effect_ends.into_iter().enumerate() {
+            // Preserve each entity's RNG/game-event order, including before the last hit's hook.
+            for (block, position, movement) in snow_contacts[from.snow..until.snow].iter().copied()
+            {
+                self.powder_snow_particle(block, position, movement);
             }
-        }
-        self.smoke_trails(trails);
-        for pos in bubble_tops {
-            self.bubble_column_particles(pos);
-        }
-        for at in deflections {
-            self.audio
-                .play("minecraft:entity.breeze.deflect", Some(at), 1.0, 1.0);
-        }
-        for (at, event) in arrow_events {
-            self.arrow_event(at, event);
+            if Some(turn) == last {
+                let listed = keep_flags.clone();
+                let mut idx = 0;
+                projectiles.retain(|_| {
+                    let keep = keep_flags[idx];
+                    idx += 1;
+                    keep
+                });
+                if !impacts.is_empty() {
+                    self.native_settle_impacts(
+                        projectiles,
+                        &listed,
+                        std::mem::take(&mut impacts),
+                        &mut hits,
+                        &mut arrow_events,
+                    );
+                }
+            }
+            for (owner, guest, at) in shoot_events[from.shoots..until.shoots].iter().copied() {
+                if let Some(conn) = guest.filter(|conn| self.lan_acting != Some(*conn)) {
+                    let dispatched = if let Some(mut host) = self.lan.take() {
+                        let result = self.as_guest(&mut host, conn, |g| {
+                            g.projectile_event("minecraft:projectile_shoot", owner, at);
+                        });
+                        self.lan = Some(host);
+                        result.is_some()
+                    } else {
+                        false
+                    };
+                    // An owner who left cannot resolve to the host. The event
+                    // still occurs, with no resolved owner (Projectile.getOwner).
+                    if !dispatched {
+                        self.projectile_event("minecraft:projectile_shoot", None, at);
+                    }
+                } else {
+                    self.projectile_event("minecraft:projectile_shoot", owner, at);
+                }
+            }
+            self.smoke_trails(trails[from.trails..until.trails].iter().copied());
+            for pos in bubble_tops[from.bubbles..until.bubbles].iter().copied() {
+                self.bubble_column_particles(pos);
+            }
+            for at in deflections[from.deflections..until.deflections]
+                .iter()
+                .copied()
+            {
+                self.audio
+                    .play("minecraft:entity.breeze.deflect", Some(at), 1.0, 1.0);
+            }
+            // Keep absolute buffer indices until settlement; cancellation can replace the last tail.
+            let arrows_until = if Some(turn) == last {
+                arrow_events.len()
+            } else {
+                until.arrows
+            };
+            for (at, event) in arrow_events[from.arrows..arrows_until].iter().copied() {
+                self.arrow_event(at, event);
+            }
+            from = until;
         }
         if self.creatures.projectiles.is_empty() {
             self.creatures.projectiles = std::mem::take(projectiles).into();
@@ -4193,6 +4236,20 @@ impl Game<'_> {
         hear: bool,
         jitter: f32,
     ) -> Result<()> {
+        if hits.is_empty() {
+            return Ok(());
+        }
+        // Collision collections retain synthetic ids across removal/reinsertion and repeated searches.
+        let mut wind_entities: std::collections::HashMap<_, _> = wind_ids.iter().copied().collect();
+        let mut wind_targets: std::collections::HashMap<_, _> = wind_ids
+            .iter()
+            .map(|&(target, entity)| (entity, target))
+            .collect();
+        let mut next_wind_target = wind_ids
+            .iter()
+            .map(|&(target, _)| target + 1)
+            .max()
+            .unwrap_or(WIND_CHARGE_IDS);
         let mut hits = std::collections::VecDeque::from(hits);
         while let Some((mut p, hit)) = hits.pop_front() {
             let arrow_hit = p.arrow.is_some() && matches!(hit, Hit::Entity { .. });
@@ -4220,7 +4277,7 @@ impl Game<'_> {
             if let Hit::Entity {
                 who: Who::Mob(id), ..
             } = hit
-                && let Some((_, entity)) = wind_ids.iter().find(|(target, _)| *target == id)
+                && let Some(entity) = wind_entities.get(&id)
             {
                 let look = self.owner_look(p.owner, p.guest);
                 if let Some(wind) = self
@@ -4265,13 +4322,28 @@ impl Game<'_> {
                 let mut arrow = self.creatures.projectiles.remove(i);
                 let mut targets = self.projectile_targets();
                 targets.extend(self.lan_projectile_targets());
-                targets.extend(wind_ids.iter().filter_map(|(target, entity)| {
-                    self.creatures
-                        .projectiles
-                        .iter()
-                        .find(|q| q.id == *entity && !q.stuck)
-                        .map(|q| (Who::Mob(*target), q.aabb()))
-                }));
+                // A synchronous hit hook/default effect may have added wind since the batch census.
+                for q in self.creatures.projectiles.iter().filter(|q| {
+                    !q.stuck
+                        && matches!(
+                            q.kind,
+                            ProjectileKind::WindCharge | ProjectileKind::BreezeWindCharge
+                        )
+                }) {
+                    let target = if let Some(&target) = wind_targets.get(&q.id) {
+                        target
+                    } else {
+                        if next_wind_target >= super::dragon::SPECIAL {
+                            return Err("wind collision ids exhausted".into());
+                        }
+                        let target = next_wind_target;
+                        next_wind_target += 1;
+                        wind_targets.insert(q.id, target);
+                        wind_entities.insert(target, q.id);
+                        target
+                    };
+                    targets.push((Who::Mob(target), q.aabb()));
+                }
                 let shooter = arrow
                     .guest
                     .and_then(|conn| {
@@ -7523,7 +7595,7 @@ impl Game<'_> {
 }
 /// `ThrownItemRenderer.submit` turns the item by `CameraRenderState.orientation`
 /// (`Camera.setRotation`): the billboard's right and up axes are the camera's.
-/// They stay continuous at pitch ±90, and in third-person front view they are
+/// They stay continuous at pitch Р вЂ™Р’В±90, and in third-person front view they are
 /// the turned-round camera's, not the player's.
 fn thrown_item_axes(
     camera_type: super::perspective::CameraType,
@@ -8313,6 +8385,9 @@ mod projectile_batch_tests {
         });
     }
     fn game() -> Game<'static> {
+        game_with_role(crate::game::execution_role::ExecutionRole::IntegratedServer)
+    }
+    fn game_with_role(role: crate::game::execution_role::ExecutionRole) -> Game<'static> {
         use crate::game::{Audio, Options, Progress, Settings, load_resources};
         let root = std::path::PathBuf::from(
             std::env::var_os("HORIZON_TEST_RESOURCES").expect("prepared resources"),
@@ -8332,7 +8407,7 @@ mod projectile_batch_tests {
         .unwrap();
         let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
         options.resources = root.clone();
-        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
+        options.execution_role = role;
         let res = Box::leak(Box::new(loaded.resources));
         Game::new(
             res,
@@ -8344,6 +8419,219 @@ mod projectile_batch_tests {
             None,
         )
         .unwrap()
+    }
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn mixed_bubble_and_snow_keep_projectile_order_and_world_random() {
+        use horizon_core::random::LegacyRandom;
+        for bubble_first in [true, false] {
+            // Presentation records actual emissions; this calls the same Game projectile path.
+            let mut g = game_with_role(crate::game::execution_role::ExecutionRole::Client);
+            g.world
+                .chunks
+                .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+            let bubble = g
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:bubble_column")
+                .unwrap();
+            let snow = g
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:powder_snow")
+                .unwrap();
+            g.world.set(1, 80, 1, bubble).unwrap();
+            g.world.set(4, 80, 1, snow).unwrap();
+            let mut pearl =
+                Projectile::new(ProjectileKind::EnderPearl, Vec3::new(1.5, 80.5, 1.5), None);
+            pearl.id = 50_000;
+            pearl.no_gravity = true;
+            pearl.has_been_shot = true;
+            let moving = arrow(50_001, Vec3::new(3.5, 80.5, 1.5), Vec3::new(1.0, 0.0, 0.0));
+            let pair = if bubble_first {
+                [pearl, moving]
+            } else {
+                [moving, pearl]
+            };
+            g.creatures.projectiles.extend(pair);
+            g.particles.requested = Some(Vec::new());
+            g.world.random = LegacyRandom::new(4);
+            g.tick_projectiles().unwrap();
+            let pearl = g
+                .creatures
+                .projectiles
+                .iter()
+                .find(|p| p.id == 50_000)
+                .unwrap();
+            let arrow = g
+                .creatures
+                .projectiles
+                .iter()
+                .find(|p| p.id == 50_001)
+                .unwrap();
+            assert_eq!(pearl.age, 1);
+            assert!(
+                pearl.velocity.y != 0.0,
+                "the actual column pushed the pearl"
+            );
+            assert_eq!(arrow.position.x, 4.5, "the arrow actually crossed the snow");
+            let requests = g.particles.requested.as_ref().unwrap();
+            let count = |name| {
+                requests
+                    .iter()
+                    .filter(|(p, _, _)| p.ty.name() == name)
+                    .count()
+            };
+            assert_eq!(count("splash"), 2);
+            assert_eq!(count("bubble"), 2);
+            let snowflakes = count("snowflake");
+            let state = g.world.random.state();
+            let next = g.world.random.next_int();
+            eprintln!(
+                "projectile-mixed-effects bubble_first={bubble_first} snowflakes={snowflakes} state={state} next={next}"
+            );
+            // Independent Java LCG seed4: 8 doubles then false; or true + 2 floats then 8 doubles.
+            let expected = if bubble_first {
+                (0, 42_568_052_862_544, -1_827_266_343)
+            } else {
+                (1, 260_246_426_437_002, 1_805_686_296)
+            };
+            assert_eq!((snowflakes, state, next), expected);
+        }
+    }
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn piercing_continuation_discovers_new_wind_without_ticking_it() {
+        use crate::game::minecarts::{CartKind, Minecart};
+        use horizon_world::nbt::Tag;
+        for spawn_wind in [false, true] {
+            let mut g = game();
+            g.world
+                .chunks
+                .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+            let kind = g.res.mob_types().get("minecraft:zombie").unwrap().clone();
+            let mut owner = Mob::new(60_000, kind, Vec3::new(100.0, 80.0, 1.5), 90.0);
+            owner.head_pitch = 0.0;
+            g.mobs.push(owner);
+            g.carts.push(Minecart::new(
+                60_001,
+                CartKind::Rideable,
+                Vec3::new(2.0, 80.0, 1.5),
+            ));
+            let mut p = arrow(60_002, Vec3::new(0.0, 80.5, 1.5), Vec3::new(8.0, 0.0, 0.0));
+            p.owner = Some(Who::Mob(60_000));
+            p.arrow.as_mut().unwrap().pierce = 2;
+            let targets = g.projectile_targets();
+            let (_, hit) =
+                horizon_client::arrows::tick(&mut p, &g.arrow_scene(&g.arrow_rain()), &targets);
+            assert!(matches!(
+                hit,
+                Hit::Entity {
+                    who: Who::Mob(60_001),
+                    ..
+                }
+            ));
+            assert!(
+                g.creatures.projectiles.is_empty(),
+                "no wind in the initial collection"
+            );
+            // Same NBT spawn path as the hit hook's summon, after the initial collision collection.
+            let wind = if spawn_wind {
+                g.next_entity = 70_000;
+                let tag = Tag::Compound(
+                    [
+                        ("id".into(), Tag::String("minecraft:wind_charge".into())),
+                        (
+                            "Pos".into(),
+                            Tag::List(
+                                [5.0, 80.5, 1.5]
+                                    .map(|v: f64| Tag::Double(v.to_bits()))
+                                    .to_vec(),
+                            ),
+                        ),
+                        (
+                            "Motion".into(),
+                            Tag::List([0.0; 3].map(|v: f64| Tag::Double(v.to_bits())).to_vec()),
+                        ),
+                        ("NoGravity".into(), Tag::Byte(1)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                );
+                let _reported_target = g.spawn_entity_from_nbt(tag);
+                let spawned: Vec<_> = g.creatures.projectiles.iter().collect();
+                assert_eq!(
+                    spawned.len(),
+                    1,
+                    "positive actual wind census: {:?}",
+                    g.creatures.projectiles
+                );
+                let q = spawned[0];
+                let id = q.id;
+                assert_eq!(q.kind, ProjectileKind::WindCharge);
+                assert_eq!(q.position, Vec3::new(5.0, 80.5, 1.5));
+                assert_eq!(q.velocity, Vec3::ZERO);
+                assert_eq!(q.owner, None);
+                Some(id)
+            } else {
+                None
+            };
+            g.projectile_hits(vec![(p, hit)], &[], false, 0.0).unwrap();
+            assert!(g.carts.is_empty(), "first impact actually removed cart A");
+            let arrow = g
+                .creatures
+                .projectiles
+                .iter()
+                .find(|p| p.id == 60_002)
+                .unwrap();
+            assert_eq!(
+                arrow.age, 1,
+                "same original flight, no independent second tick"
+            );
+            eprintln!(
+                "projectile-new-wind spawned={spawn_wind} arrow_at={:?} arrow_velocity={:?}",
+                arrow.position, arrow.velocity
+            );
+            if let Some(id) = wind {
+                let q = g.creatures.projectiles.iter().find(|q| q.id == id).unwrap();
+                assert_eq!(
+                    q.age, 0,
+                    "the new wind has not received an independent turn"
+                );
+                assert_eq!(q.position, Vec3::new(5.0, 80.5, 1.5));
+                assert_eq!(
+                    q.owner,
+                    Some(Who::Mob(60_000)),
+                    "same-flight AIM_DEFLECT resolved the new entity"
+                );
+                assert!(
+                    q.velocity.x < -0.99 && q.velocity.y.abs() < 1e-9 && q.velocity.z.abs() < 1e-6
+                );
+                assert_eq!(
+                    arrow.position,
+                    Vec3::new(8.0, 80.5, 1.5),
+                    "original movement endpoint"
+                );
+                assert!(arrow.velocity.x < 0.0);
+                let pierced = &arrow.arrow.as_ref().unwrap().pierced;
+                assert_eq!(pierced.len(), 2);
+                assert!(pierced.contains(&Who::Mob(60_001)));
+                assert!(
+                    pierced
+                        .iter()
+                        .any(|who| matches!(who, Who::Mob(id) if wind_charge_hit(*id).is_some()))
+                );
+            } else {
+                assert_eq!(
+                    arrow.position,
+                    Vec3::new(8.0, 80.5, 1.5),
+                    "unobstructed original endpoint control"
+                );
+                assert!(arrow.velocity.x > 0.0);
+            }
+        }
     }
     fn arrow(id: u32, at: Vec3, velocity: Vec3) -> Projectile {
         let mut p = Projectile::new(
