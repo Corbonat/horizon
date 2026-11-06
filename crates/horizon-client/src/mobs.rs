@@ -56,6 +56,7 @@ pub mod landing;
 pub mod leash;
 pub mod living;
 pub mod llama;
+pub mod model_layers;
 pub mod monster_brain;
 pub mod nautilus;
 pub mod nav;
@@ -1410,6 +1411,9 @@ pub struct Mob {
     pub last_hurt: f32,
     /// `LivingEntity.getAbsorptionAmount`: golden hearts that soak damage before health.
     pub absorption: f32,
+    /// Tenths of absorbed damage a player's hit dealt, which the attack awards as
+    /// `Stats.DAMAGE_DEALT_ABSORBED` to the player whose turn it is (see [`Mob::soak_hit`]).
+    pub dealt_absorbed: i32,
     pub last_damage: Option<(Damage, i64)>,
     /// `DamageSource.getDirectEntity` of `last_damage` when [`Damage`] cannot name it (a
     /// thrown potion, an area effect cloud): its entity type.
@@ -1439,6 +1443,9 @@ pub struct Mob {
     /// `PlayerSkin.cape`: a player's cape texture, once every download of
     /// its skin is ready.
     pub cape: Option<String>,
+    /// A Horizon emote this player plays (docs/cosmetics.md), timed on `age`: it poses the bones
+    /// after the vanilla animation (`anim::setup`). Visual only.
+    pub emote: Option<horizon_cosmetics::Playing>,
     /// A mannequin's `DATA_PROFILE` (ResolvableProfile): the profile's
     /// `textures` property resolves to `skin` like a player's.
     pub profile: Option<horizon_protocol::entity_data::Profile>,
@@ -1934,6 +1941,13 @@ pub enum MobEvent {
         table: &'static str,
         at: [f64; 3],
     },
+    /// A leave-block goal's sampled candidate, before neighbor-shape updates.
+    EndermanPlaceBlock {
+        mob: u32,
+        pos: [i32; 3],
+        carried: horizon_world::registry::BlockStateId,
+        occupants: Vec<horizon_core::geometry::Aabb>,
+    },
     SetBlock {
         pos: [i32; 3],
         state: horizon_world::registry::BlockStateId,
@@ -2201,6 +2215,8 @@ pub enum MobEvent {
         from: [f64; 3],
         to: [f64; 3],
         ticks: i32,
+        /// `VibrationSystem.User.getPositionSource`: the listener itself.
+        source: horizon_protocol::entity_data::PositionSource,
     },
     /// The crumbs of the block under a digging or emerging warden.
     DigParticles {
@@ -2475,7 +2491,9 @@ impl Mob {
     }
 
     /// What other mobs see of this one this tick (`player`: the player's
-    /// UUID, which villagers' reputation is keyed by).
+    /// UUID, which villagers' reputation is keyed by). Inline: the game's
+    /// snapshot of every mob writes each one in its slot, not through a copy.
+    #[inline]
     pub fn seen(&self, player: Option<[i32; 4]>) -> Seen {
         let m = self;
         let villager = m.species() == Species::Villager;
@@ -3053,6 +3071,7 @@ impl Mob {
             air: 300,
             last_hurt: 0.0,
             absorption: 0.0,
+            dealt_absorbed: 0,
             last_damage: None,
             last_direct: None,
             combat: combat::Tracker::default(),
@@ -3068,6 +3087,7 @@ impl Mob {
             slim: false,
             skin_3d: None,
             cape: None,
+            emote: None,
             profile: None,
             random_textures: Default::default(),
             attrs: Attrs {
@@ -3408,7 +3428,7 @@ impl Mob {
             if absorbed {
                 self.hurt_wolf_armor(dealt);
             } else {
-                let dealt = self.soak_absorption(dealt);
+                let dealt = self.soak_hit(dealt, &source);
                 self.health -= dealt;
             }
             self.last_hurt = amount;
@@ -3420,7 +3440,7 @@ impl Mob {
             if absorbed {
                 self.hurt_wolf_armor(amount);
             } else {
-                let through = self.soak_absorption(amount);
+                let through = self.soak_hit(amount, &source);
                 self.health -= through;
             }
             self.hurt_time = 10;
@@ -3783,6 +3803,21 @@ impl Mob {
             && (before != after
                 || present_ambient != self.extra.ambient_effects.contains(&effect)
                 || was_visible != visible)
+    }
+    /// [`Mob::soak_absorption`] for a hit from `source`: `LivingEntity.actuallyHurt`
+    /// credits a `ServerPlayer` attacker with the absorbed damage in tenths.
+    fn soak_hit(&mut self, damage: f32, source: &Damage) -> f32 {
+        let through = self.soak_absorption(damage);
+        let absorbed = damage - through;
+        if absorbed > 0.0
+            && absorbed < 3.402_823_5e37
+            && matches!(source.attacker, Some(Who::Player))
+        {
+            self.dealt_absorbed = self
+                .dealt_absorbed
+                .saturating_add((absorbed * 10.0).round() as i32);
+        }
+        through
     }
     /// `LivingEntity.actuallyHurt`: the absorption amount takes the damage first;
     /// what is left reaches the health.

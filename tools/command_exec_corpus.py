@@ -11,6 +11,10 @@ depend on world generation.
 """
 
 
+# This fixture establishes its own live clock before spawning actors.
+ISOLATED_WOLF_ANGER = frozenset({'wolf anger live writes'})
+
+
 def cmd(command, record=True, expect_result=None, comparison=None):
     op = {'op': 'cmd', 'cmd': command}
     if not record:
@@ -49,6 +53,12 @@ def inline_predicate_constants():
 
 def predicate_selector_fixtures(group_names):
     fixtures = {}
+    if 'mob effect predicate view' in group_names:
+        try:
+            from .mob_effect_predicate_corpus import predicates as effect_predicates
+        except ImportError:
+            from mob_effect_predicate_corpus import predicates as effect_predicates
+        fixtures.update(effect_predicates())
     if 'named smoke predicates' in group_names:
         always = {'type': 'minecraft:all_of', 'terms': []}
         fixtures['command_smoke:always'] = always
@@ -1817,6 +1827,12 @@ def advancement_reward_fixtures(group_names):
 
 def function_return_fixtures(group_names):
     functions = {}
+    if any(name.startswith('wolf anger ') for name in group_names):
+        try:
+            from .wolf_anger_corpus import functions as anger_functions
+        except ImportError:
+            from wolf_anger_corpus import functions as anger_functions
+        functions.update(anger_functions())
     if 'function return feedback' in group_names:
         functions.update({'parity:fail': 'return fail\n', 'parity:zero': 'return 0\n',
                           'parity:value': 'return 7\n', 'parity:empty': '# no commands\n',
@@ -3839,6 +3855,44 @@ def awake_villager_saved_position():
 
 
 
+def orb_saved_uuid():
+    """Zero-tick identity gate; complete entity bodies remain raw diagnostics."""
+    ops = [cmd('/tick freeze'), cmd('/forceload add 160 160 175 175'),
+           {'op': 'wait_chunks', 'chunks': [[10, 10]]},
+           cmd('/fill 160 199 160 175 199 175 stone', expect_result=256),
+           cmd('/execute if loaded 164 200 164', expect_result=1),
+           cmd('/execute if block 164 199 164 stone', expect_result=1),
+           cmd('/scoreboard objectives add orb_identity dummy', expect_result=1)]
+    ops += setup('/execute store result score start orb_identity run time query gametime')
+    for kind, target, array, x, fields in [
+        ('experience_orb', '00000000-0000-0000-0000-000000000002', '[I;0,0,0,2]', 164.5,
+         'Value:1s,Age:0s,Health:5s'),
+        ('pig', '0000000b-0000-000c-0000-000d0000000e', '[I;11,12,13,14]', 166.5,
+         'Health:10f,NoAI:1b,Silent:1b,PersistenceRequired:1b'),
+    ]:
+        tag = f'orb_identity_{kind}'
+        body = f'Pos:[{x}d,200d,164.5d],Motion:[0d,0d,0d],NoGravity:1b,{fields}'
+        ops += [cmd(f'/summon minecraft:{kind} {x} 200 164.5 {{UUID:{array},Tags:["{tag}"],{body}}}', expect_result=1),
+                # No saved-UUID predicate in admission: that is the defect under test.
+                cmd(f'/execute as {target} if entity @s[type=minecraft:{kind},tag={tag}]', expect_result=1),
+                cmd(f'/execute if data entity {target} {{{body}}}', expect_result=1)]
+        for _ in range(3):
+            ops += setup('/scoreboard players set value orb_identity 317',
+                         '/scoreboard players set success orb_identity 17')
+            ops += [cmd(f'/data get entity {target} UUID', expect_result=4),
+                    cmd(f'/execute store result score value orb_identity store success score success orb_identity run data get entity {target} UUID', expect_result=4),
+                    cmd('/scoreboard players get value orb_identity', expect_result=4),
+                    cmd('/scoreboard players get success orb_identity', expect_result=1),
+                    cmd(f'/execute if data entity {target} {{UUID:{array}}}', expect_result=1),
+                    cmd(f'/execute as {target} if entity @s[type=minecraft:{kind},tag={tag}]', expect_result=1)]
+            full = cmd(f'/data get entity {target}', record=False)
+            full['trace'] = True
+            ops.append(full)
+    ops += setup('/execute store result score elapsed orb_identity run time query gametime',
+                 '/scoreboard players operation elapsed orb_identity -= start orb_identity')
+    return ops + [cmd('/scoreboard players get elapsed orb_identity', expect_result=0)]
+
+
 def projectile_saved_uuid():
     """Direct identity guards are separate from repeated saved UUID views."""
     from uuid import UUID
@@ -5508,13 +5562,25 @@ def command_zombie_reinforcements(once=False, raw=False, legacy=False):
 # what they leave behind reaches no other group.
 ISOLATED_REINFORCEMENTS = frozenset({'command zombie reinforcements', 'command reinforcement once'})
 # These overlays replace built-in recipes, never beside the corpus's fixed vanilla recipe-count controls.
-ISOLATED_RECIPES = frozenset({'crafting recipe priority', 'crafting base recipe control'})
-ISOLATED_GROUPS = ISOLATED_REINFORCEMENTS | ISOLATED_RECIPES
+ISOLATED_RECIPES = frozenset({'crafting recipe priority', 'crafting base recipe control', 'transmute result patches'})
+ISOLATED_FRAME_MAPS = frozenset({'frame live map detachment'})
+ISOLATED_ORB_UUID = frozenset({'orb saved UUID'})
+ISOLATED_GROUPS = ISOLATED_REINFORCEMENTS | ISOLATED_RECIPES | ISOLATED_WOLF_ANGER | ISOLATED_FRAME_MAPS | ISOLATED_ORB_UUID
 
 
 def groups():
     try:
+        from .transmute_patch_corpus import cases as transmute_patches
+    except ImportError:
+        from transmute_patch_corpus import cases as transmute_patches
+    try:
+        from .mob_effect_predicate_corpus import cases as mob_effect_predicates
+    except ImportError:
+        from mob_effect_predicate_corpus import cases as mob_effect_predicates
+    try:
+        from .frame_map_corpus import frame_maps
         from .allay_damage_corpus import allay_player_damage
+        from .wolf_anger_corpus import groups as wolf_anger_groups
         from .allay_healing_corpus import allay_healing
         from .loaded_cloud_corpus import loaded_clouds
         from .moving_piston_data_corpus import moving_piston_data
@@ -5523,7 +5589,9 @@ def groups():
         from .gateway_passenger_corpus import gateway_passengers
         from .item_merge_corpus import stack_limit_merges
     except ImportError:
+        from frame_map_corpus import frame_maps
         from allay_damage_corpus import allay_player_damage
+        from wolf_anger_corpus import groups as wolf_anger_groups
         from allay_healing_corpus import allay_healing
         from loaded_cloud_corpus import loaded_clouds
         from moving_piston_data_corpus import moving_piston_data
@@ -5533,7 +5601,12 @@ def groups():
         from item_merge_corpus import stack_limit_merges
     return [
         ('setup', group_setup()),
+        ('orb saved UUID', orb_saved_uuid()),
+        ('transmute result patches', transmute_patches(cmd, setup)),
+        ('mob effect predicate view', mob_effect_predicates(cmd, setup)),
+        ('frame live map detachment', frame_maps(cmd, setup)),
         ('allay player damage immunity', allay_player_damage(cmd, setup)),
+        *wolf_anger_groups(cmd, setup),
         ('allay passive healing', allay_healing(cmd, setup)),
         ('crafter map extension', crafter_map_extension()),
 
